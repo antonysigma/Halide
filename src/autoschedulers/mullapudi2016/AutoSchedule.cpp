@@ -2386,13 +2386,8 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     }
 
     std::ostringstream oss;
-    //if (t.has_gpu_feature()) {
-    //    f_handle.gpu_tile(v, outer, inner, factor, strategy);
-    //    oss << "gpu_tile(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
-    //} else {
     f_handle.split(v, outer, inner, factor, strategy);
     oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
-    //}
 
     switch (strategy) {
     case TailStrategy::RoundUp:
@@ -2412,6 +2407,18 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     }
     sched.push_schedule(f_handle.name(), stage_num, oss.str(),
                         {arg_name, outer_name, inner_name});
+
+    if (t.has_gpu_feature()) {
+        f_handle.gpu_threads(inner);
+        sched.push_schedule(f_handle.name(), stage_num,
+                            "gpu_threads(" + inner_name + ")",
+                            {inner_name});
+
+        f_handle.gpu_blocks(outer);
+        sched.push_schedule(f_handle.name(), stage_num,
+                            "gpu_blocks(" + outer_name + ")",
+                            {outer_name});
+    }
 
     const Expr &est = get_element(estimates, arg_name);
     internal_assert(est.defined());
@@ -2461,30 +2468,28 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
         internal_assert(is_rvar == dims[vec_dim_index].is_rvar());
 
         VarOrRVar vec_var(vec_dim_name, is_rvar);
-        pair<VarOrRVar, VarOrRVar> split_vars =
-            split_dim(g, f_handle, stage_num, def, is_group_output, vec_var, vec_len,
-                      "_vi", "_vo", estimates, sched, t);
-
         if (t.has_gpu_feature()) {
-            f_handle.gpu_threads(split_vars.first);
-            //f_handle.gpu_blocks(split_vars.second);
+            f_handle.gpu_threads(vec_var);
             sched.push_schedule(f_handle.name(), stage_num,
-                                "gpu_threads(" + split_vars.first.name() + ")",
-                                {split_vars.first.name()});
+                                "gpu_threads(" + vec_var.name() + ")",
+                                {vec_var.name()});
             //sched.push_schedule(f_handle.name(), stage_num,
             //                    "gpu_blocks(" + split_vars.second.name() + ")",
             //                    {split_vars.second.name()});
         } else {
+            pair<VarOrRVar, VarOrRVar> split_vars =
+                split_dim(g, f_handle, stage_num, def, is_group_output, vec_var, vec_len,
+                          "_vi", "_vo", estimates, sched, t);
+
             f_handle.vectorize(split_vars.first);
             sched.push_schedule(f_handle.name(), stage_num,
                                 "vectorize(" + split_vars.first.name() + ")",
                                 {split_vars.first.name()});
-        }
-
-        if (is_rvar) {
-            rvars.erase(vec_dim_name);
-            rvars.insert(split_vars.first.name());
-            rvars.insert(split_vars.second.name());
+            if (is_rvar) {
+                rvars.erase(vec_dim_name);
+                rvars.insert(split_vars.first.name());
+                rvars.insert(split_vars.second.name());
+            }
         }
 
         // TODO: Reorder vector dim to innermost if it is the innermost
