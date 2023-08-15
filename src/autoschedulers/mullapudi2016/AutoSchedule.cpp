@@ -1219,7 +1219,7 @@ struct Partitioner {
     pair<VarOrRVar, VarOrRVar> split_dim(
         const Group &g, Stage f_handle, int stage_num, const Definition &def,
         bool is_group_output, const VarOrRVar &v, const Expr &factor, const string &in_suffix,
-        const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched);
+        const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched, const Target &t);
 
     // Loop over the dimensions of function stage 'f_handle' starting from innermost
     // and vectorize the first pure dimension encountered.
@@ -2336,7 +2336,7 @@ string get_base_name(string name) {
 pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     const Group &g, Stage f_handle, int stage_num, const Definition &def,
     bool is_group_output, const VarOrRVar &v, const Expr &factor, const string &in_suffix,
-    const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched) {
+    const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched, const Target &t) {
     // Create new variables for the split dimensions
     string arg_name = v.name();
     string inner_name = arg_name + in_suffix;
@@ -2385,10 +2385,15 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
         strategy = TailStrategy::GuardWithIf;
     }
 
-    f_handle.split(v, outer, inner, factor, strategy);
-
     std::ostringstream oss;
+    //if (t.has_gpu_feature()) {
+    //    f_handle.gpu_tile(v, outer, inner, factor, strategy);
+    //    oss << "gpu_tile(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
+    //} else {
+    f_handle.split(v, outer, inner, factor, strategy);
     oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
+    //}
+
     switch (strategy) {
     case TailStrategy::RoundUp:
         oss << ", TailStrategy::RoundUp)";
@@ -2431,6 +2436,9 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
     for (const auto &type : func.output_types()) {
         vec_len = std::max(vec_len, t.natural_vector_size(type));
     }
+    if (t.has_gpu_feature()) {
+        vec_len = std::clamp(vec_len, 32, 1024);
+    }
 
     for (int d = 0; d < (int)dims.size() - 1; d++) {
         string dim_name = get_base_name(dims[d].var);
@@ -2455,12 +2463,23 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
         VarOrRVar vec_var(vec_dim_name, is_rvar);
         pair<VarOrRVar, VarOrRVar> split_vars =
             split_dim(g, f_handle, stage_num, def, is_group_output, vec_var, vec_len,
-                      "_vi", "_vo", estimates, sched);
+                      "_vi", "_vo", estimates, sched, t);
 
-        f_handle.vectorize(split_vars.first);
-        sched.push_schedule(f_handle.name(), stage_num,
-                            "vectorize(" + split_vars.first.name() + ")",
-                            {split_vars.first.name()});
+        if (t.has_gpu_feature()) {
+            f_handle.gpu_threads(split_vars.first);
+            //f_handle.gpu_blocks(split_vars.second);
+            sched.push_schedule(f_handle.name(), stage_num,
+                                "gpu_threads(" + split_vars.first.name() + ")",
+                                {split_vars.first.name()});
+            //sched.push_schedule(f_handle.name(), stage_num,
+            //                    "gpu_blocks(" + split_vars.second.name() + ")",
+            //                    {split_vars.second.name()});
+        } else {
+            f_handle.vectorize(split_vars.first);
+            sched.push_schedule(f_handle.name(), stage_num,
+                                "vectorize(" + split_vars.first.name() + ")",
+                                {split_vars.first.name()});
+        }
 
         if (is_rvar) {
             rvars.erase(vec_dim_name);
@@ -2706,7 +2725,7 @@ void Partitioner::generate_group_cpu_schedule(
             } else {
                 pair<VarOrRVar, VarOrRVar> tile_vars =
                     split_dim(g, f_handle, g.output.stage_num, def, true, v,
-                              tile_size, "_i", "_o", stg_estimates, sched);
+                              tile_size, "_i", "_o", stg_estimates, sched, t);
 
                 inner_dims.push_back(tile_vars.first);
                 outer_dims.push_back(tile_vars.second);
@@ -2747,8 +2766,10 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    vectorize_stage(g, f_handle, g.output.stage_num, def, g_out, true, t,
-                    rvars, stg_estimates, sched);
+    if (!t.has_gpu_feature()) {
+        vectorize_stage(g, f_handle, g.output.stage_num, def, g_out, true, t,
+                        rvars, stg_estimates, sched);
+    }
 
     // Parallelize definition
     Expr def_par = 1;
@@ -2759,8 +2780,8 @@ void Partitioner::generate_group_cpu_schedule(
     // is achieved. Stop the search once we find a vectorized dimension since
     // it doesn't make any sense to have a parallelized inner loop within a
     // vectorized outer loop.
-    bool nested_parallelism = true;
-    if (nested_parallelism) {
+    constexpr bool nested_parallelism = true;
+    if constexpr (nested_parallelism) {
         int dim_start = dims.size() - 2;
         string seq_var;
         for (int d = dim_start; d >= 0; d--) {
@@ -2794,9 +2815,15 @@ void Partitioner::generate_group_cpu_schedule(
                                         "reorder(" + seq_var + ", " + var + ")",
                                         {seq_var, var});
                 }
-                f_handle.parallel(v);
-                sched.push_schedule(f_handle.name(), g.output.stage_num,
-                                    "parallel(" + var + ")", {var});
+                if (t.has_gpu_feature()) {
+                    f_handle.gpu_blocks(v);
+                    sched.push_schedule(f_handle.name(), g.output.stage_num,
+                                        "gpu_blocks(" + var + ")", {var});
+                } else {
+                    f_handle.parallel(v);
+                    sched.push_schedule(f_handle.name(), g.output.stage_num,
+                                        "parallel(" + var + ")", {var});
+                }
                 def_par = simplify(def_par * iter->second);
             } else {
                 break;
@@ -2804,7 +2831,7 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    if (can_prove(def_par < arch_params.parallelism)) {
+    if (can_prove(def_par < arch_params.parallelism && def_par != 1)) {
         user_warning << "Insufficient parallelism for " << f_handle.name() << "\n";
     }
 
