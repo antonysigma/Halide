@@ -971,8 +971,8 @@ public:
         : f(_f), stage_num(n) {
     }
 
-    void canParallelize(VarOrRVar v) {
-        parallelize.try_emplace(v.name(), tuple_t{std::move(v), 1, TailStrategy::Auto});
+    void canParallelize(VarOrRVar v, Expr factor) {
+        parallelize.try_emplace(v.name(), tuple_t{std::move(v), factor, TailStrategy::Auto});
     }
 
     void canSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr len, TailStrategy strategy) {
@@ -1010,11 +1010,11 @@ public:
                 continue;
             }
 
-            const Expr desired_factor = clamp(value, vmin, vmax);
-            const Expr factor = simplify(min(threads_budget, desired_factor));
+            //const Expr desired_factor = clamp(value, vmin, vmax);
+            const Expr factor = simplify(min(threads_budget, value));
 
             helper.applySplit(v, v_o, v_i, factor);
-            threads_budget = max(threads_budget / factor, 1);
+            threads_budget = simplify(max(threads_budget / factor, 1));
         }
 
         helper.applyReorder(f, stage_num, sched);
@@ -2958,7 +2958,7 @@ void Partitioner::generate_group_cpu_schedule(
                                         {seq_var, var});
                 }
                 if (t.has_gpu_feature()) {
-                    gpu_tiling.canParallelize(v);
+                    gpu_tiling.canParallelize(v, iter->second);
                 } else {
                     f_handle.parallel(v);
                     sched.push_schedule(f_handle.name(), g.output.stage_num,
