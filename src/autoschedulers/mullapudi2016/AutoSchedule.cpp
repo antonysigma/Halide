@@ -880,6 +880,71 @@ struct AutoSchedule {
     }
 };
 
+class GPUTileHelper {
+    Stage &f;
+    const uint32_t stage_num;
+    AutoSchedule &sched;
+
+    std::vector<VarOrRVar> vo_list;
+    std::vector<VarOrRVar> vi_list;
+
+    std::vector<VarOrRVar> reorder() const {
+        std::vector<VarOrRVar> var_list;
+        std::copy(vi_list.rbegin(), vi_list.rend(), std::back_inserter(var_list));
+        std::copy(vo_list.rbegin(), vo_list.rend(), std::back_inserter(var_list));
+
+        return var_list;
+    }
+
+public:
+    GPUTileHelper(Stage &_f, uint32_t n, AutoSchedule &s)
+        : f(_f), stage_num(n), sched(s) {
+    }
+
+    void applySplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor) {
+        f.split(v, vo, vi, factor);
+
+        std::stringstream oss;
+        oss << "split(" << v.name() << ", " << vo.name() << ", " << vi.name() << ", " << factor << ")";
+        sched.push_schedule(f.name(), stage_num, oss.str(),
+                            {vo.name(), vi.name()});
+
+        f.gpu(vo, vi);
+        sched.push_schedule(f.name(), stage_num, "gpu(" + vo.name() + ", " + vi.name() + ")",
+                            {vo.name(), vi.name()});
+
+        vo_list.emplace_back(vo);
+        vi_list.emplace_back(vi);
+    }
+
+    void applyReorder(Stage &f, uint32_t stage_num, AutoSchedule &sched) const {
+        if (vo_list.empty()) {
+            //f.gpu_single_thread();
+            //sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
+            return;
+        }
+
+        std::stringstream oss;
+        std::set<std::string> var_names;
+
+        oss << "reorder(";
+        const auto reordered = reorder();
+
+        for (auto iter = reordered.begin(); iter != reordered.end(); iter++) {
+            oss << iter->name();
+            if (iter != reordered.end() - 1) {
+                oss << ", ";
+            }
+            var_names.emplace(iter->name());
+        }
+
+        oss << ")";
+
+        f.reorder(reordered);
+        sched.push_schedule(f.name(), stage_num, oss.str(), var_names);
+    }
+};
+
 class GPUTiling {
     constexpr static int vmin = 32;
     constexpr static int vmax = 1024;
@@ -888,7 +953,7 @@ class GPUTiling {
     const uint32_t stage_num;
     bool is_compute_at = false;
     using tuple_t = std::tuple<VarOrRVar, Expr, TailStrategy>;
-    std::unordered_map<std::string, tuple_t> parallelize;
+    std::map<std::string, tuple_t> parallelize;
 
     std::set<std::string> outer_vars;
     std::set<std::string> splitted_vars;
@@ -924,6 +989,7 @@ public:
     void apply(AutoSchedule &sched) const {
 
         Expr threads_budget = 32;
+        GPUTileHelper helper{f, stage_num, sched};
 
         for (const auto [var, entry] : parallelize) {
             const auto &[v, value, strategy] = entry;
@@ -947,20 +1013,11 @@ public:
             const Expr desired_factor = clamp(value, vmin, vmax);
             const Expr factor = simplify(min(threads_budget, desired_factor));
 
-            std::stringstream oss;
-            //oss << "split(" << var << ", " << outer << ", " << inner << ", " << factor << ")";
-            //sched.push_schedule(f.name(), stage_num, oss.str(), {var, outer, inner});
-            //sched.push_schedule(f.name(), stage_num, "gpu_threads(" + inner + ")", {var, inner});
-            //sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + outer + ")", {var, outer});
-            oss << "gpu_tile(" << var << ", " << outer << ", " << inner << ", " << factor << ")";
-            sched.push_schedule(f.name(), stage_num, oss.str(), {var, outer, inner});
-
-            threads_budget = max(threads_budget / desired_factor, 1);
-
-            //std::stringstream oss;
-            //oss << "gpu_tile(" << var << ", " << inner << ", " << factor << ")";
-            //sched.push_schedule(f.name(), stage_num, oss.str(), {var, inner});
+            helper.applySplit(v, v_o, v_i, factor);
+            threads_budget = max(threads_budget / factor, 1);
         }
+
+        helper.applyReorder(f, stage_num, sched);
     }
 };
 
@@ -2901,10 +2958,6 @@ void Partitioner::generate_group_cpu_schedule(
                                         {seq_var, var});
                 }
                 if (t.has_gpu_feature()) {
-                    //f_handle.gpu_blocks(v);
-                    //sched.push_schedule(f_handle.name(), g.output.stage_num,
-                    //                    "gpu_blocks(" + var + ")", {var});
-
                     gpu_tiling.canParallelize(v);
                 } else {
                     f_handle.parallel(v);
