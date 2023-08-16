@@ -919,8 +919,8 @@ public:
 
     void applyReorder(Stage &f, uint32_t stage_num, AutoSchedule &sched) const {
         if (vo_list.empty()) {
-            //f.gpu_single_thread();
-            //sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
+            f.gpu_single_thread();
+            sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
             return;
         }
 
