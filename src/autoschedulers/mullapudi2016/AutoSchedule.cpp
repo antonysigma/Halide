@@ -880,6 +880,90 @@ struct AutoSchedule {
     }
 };
 
+class GPUTiling {
+    constexpr static int vmin = 32;
+    constexpr static int vmax = 1024;
+
+    Stage &f;
+    const uint32_t stage_num;
+    bool is_compute_at = false;
+    using tuple_t = std::tuple<VarOrRVar, Expr, TailStrategy>;
+    std::unordered_map<std::string, tuple_t> parallelize;
+
+    std::set<std::string> outer_vars;
+    std::set<std::string> splitted_vars;
+
+    bool needSplitting(const std::string &variable_name) const {
+        return splitted_vars.find(variable_name) == splitted_vars.end();
+    }
+
+    bool isOuter(const std::string &variable_name) const {
+        return outer_vars.find(variable_name) != outer_vars.end();
+    }
+
+public:
+    GPUTiling(Stage &_f, uint32_t n)
+        : f(_f), stage_num(n) {
+    }
+
+    void canParallelize(VarOrRVar v) {
+        parallelize.try_emplace(v.name(), tuple_t{std::move(v), 1, TailStrategy::Auto});
+    }
+
+    void canSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr len, TailStrategy strategy) {
+        splitted_vars.emplace(v.name());
+        outer_vars.emplace(vo.name());
+
+        parallelize.try_emplace(v.name(), tuple_t{std::move(v), len, strategy});
+    }
+
+    void markComputeAt() {
+        is_compute_at = true;
+    }
+
+    void apply(AutoSchedule &sched) const {
+
+        Expr threads_budget = 32;
+
+        for (const auto [var, entry] : parallelize) {
+            const auto &[v, value, strategy] = entry;
+
+            if (isOuter(var)) {
+                f.gpu_blocks(v);
+                sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + var + ")", {var});
+                continue;
+            }
+
+            const auto inner = var + "_i";
+            const auto outer = var + "_o";
+            VarOrRVar v_i{inner, v.is_rvar}, v_o{outer, v.is_rvar};
+
+            if (!needSplitting(var)) {
+                f.gpu(v_o, v_i);
+                sched.push_schedule(f.name(), stage_num, "gpu(" + outer + ", " + inner + ")", {outer, inner});
+                continue;
+            }
+
+            const Expr desired_factor = clamp(value, vmin, vmax);
+            const Expr factor = simplify(min(threads_budget, desired_factor));
+
+            std::stringstream oss;
+            //oss << "split(" << var << ", " << outer << ", " << inner << ", " << factor << ")";
+            //sched.push_schedule(f.name(), stage_num, oss.str(), {var, outer, inner});
+            //sched.push_schedule(f.name(), stage_num, "gpu_threads(" + inner + ")", {var, inner});
+            //sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + outer + ")", {var, outer});
+            oss << "gpu_tile(" << var << ", " << outer << ", " << inner << ", " << factor << ")";
+            sched.push_schedule(f.name(), stage_num, oss.str(), {var, outer, inner});
+
+            threads_budget = max(threads_budget / desired_factor, 1);
+
+            //std::stringstream oss;
+            //oss << "gpu_tile(" << var << ", " << inner << ", " << factor << ")";
+            //sched.push_schedule(f.name(), stage_num, oss.str(), {var, inner});
+        }
+    }
+};
+
 // Implement the grouping algorithm and the cost model for making the grouping
 // choices.
 struct Partitioner {
@@ -1219,7 +1303,8 @@ struct Partitioner {
     pair<VarOrRVar, VarOrRVar> split_dim(
         const Group &g, Stage f_handle, int stage_num, const Definition &def,
         bool is_group_output, const VarOrRVar &v, const Expr &factor, const string &in_suffix,
-        const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched, const Target &t);
+        const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched,
+        const Target &t, GPUTiling *gpu_tiling = nullptr);
 
     // Loop over the dimensions of function stage 'f_handle' starting from innermost
     // and vectorize the first pure dimension encountered.
@@ -2336,7 +2421,8 @@ string get_base_name(string name) {
 pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     const Group &g, Stage f_handle, int stage_num, const Definition &def,
     bool is_group_output, const VarOrRVar &v, const Expr &factor, const string &in_suffix,
-    const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched, const Target &t) {
+    const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched,
+    const Target &t, GPUTiling *gpu_tiling) {
     // Create new variables for the split dimensions
     string arg_name = v.name();
     string inner_name = arg_name + in_suffix;
@@ -2385,8 +2471,12 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
         strategy = TailStrategy::GuardWithIf;
     }
 
-    std::ostringstream oss;
+    if (t.has_gpu_feature() && gpu_tiling) {
+        gpu_tiling->canSplit(v, outer, inner, factor, strategy);
+    }
+
     f_handle.split(v, outer, inner, factor, strategy);
+    std::ostringstream oss;
     oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
 
     switch (strategy) {
@@ -2407,18 +2497,6 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     }
     sched.push_schedule(f_handle.name(), stage_num, oss.str(),
                         {arg_name, outer_name, inner_name});
-
-    if (t.has_gpu_feature()) {
-        f_handle.gpu_threads(inner);
-        sched.push_schedule(f_handle.name(), stage_num,
-                            "gpu_threads(" + inner_name + ")",
-                            {inner_name});
-
-        f_handle.gpu_blocks(outer);
-        sched.push_schedule(f_handle.name(), stage_num,
-                            "gpu_blocks(" + outer_name + ")",
-                            {outer_name});
-    }
 
     const Expr &est = get_element(estimates, arg_name);
     internal_assert(est.defined());
@@ -2469,10 +2547,10 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
 
         VarOrRVar vec_var(vec_dim_name, is_rvar);
         if (t.has_gpu_feature()) {
-            f_handle.gpu_threads(vec_var);
-            sched.push_schedule(f_handle.name(), stage_num,
-                                "gpu_threads(" + vec_var.name() + ")",
-                                {vec_var.name()});
+            //f_handle.gpu_threads(vec_var);
+            //sched.push_schedule(f_handle.name(), stage_num,
+            //                    "gpu_threads(" + vec_var.name() + ")",
+            //                    {vec_var.name()});
             //sched.push_schedule(f_handle.name(), stage_num,
             //                    "gpu_blocks(" + split_vars.second.name() + ")",
             //                    {split_vars.second.name()});
@@ -2715,6 +2793,8 @@ void Partitioner::generate_group_cpu_schedule(
         dim_vars[d] = get_base_name(dims[d].var);
     }
 
+    GPUTiling gpu_tiling{f_handle, g.output.stage_num};
+
     // Apply tiling to output of the group
     for (const auto &var : dim_vars) {
         bool is_rvar = (rvars.find(var) != rvars.end());
@@ -2730,7 +2810,7 @@ void Partitioner::generate_group_cpu_schedule(
             } else {
                 pair<VarOrRVar, VarOrRVar> tile_vars =
                     split_dim(g, f_handle, g.output.stage_num, def, true, v,
-                              tile_size, "_i", "_o", stg_estimates, sched, t);
+                              tile_size, "_i", "_o", stg_estimates, sched, t, &gpu_tiling);
 
                 inner_dims.push_back(tile_vars.first);
                 outer_dims.push_back(tile_vars.second);
@@ -2821,9 +2901,11 @@ void Partitioner::generate_group_cpu_schedule(
                                         {seq_var, var});
                 }
                 if (t.has_gpu_feature()) {
-                    f_handle.gpu_blocks(v);
-                    sched.push_schedule(f_handle.name(), g.output.stage_num,
-                                        "gpu_blocks(" + var + ")", {var});
+                    //f_handle.gpu_blocks(v);
+                    //sched.push_schedule(f_handle.name(), g.output.stage_num,
+                    //                    "gpu_blocks(" + var + ")", {var});
+
+                    gpu_tiling.canParallelize(v);
                 } else {
                     f_handle.parallel(v);
                     sched.push_schedule(f_handle.name(), g.output.stage_num,
@@ -2835,6 +2917,8 @@ void Partitioner::generate_group_cpu_schedule(
             }
         }
     }
+
+    gpu_tiling.apply(sched);
 
     if (can_prove(def_par < arch_params.parallelism && def_par != 1)) {
         user_warning << "Insufficient parallelism for " << f_handle.name() << "\n";
@@ -2884,6 +2968,8 @@ void Partitioner::generate_group_cpu_schedule(
                 } else {
                     Func(mem.func).compute_at(Func(g_out), tile_inner_var.var);
                 }
+                gpu_tiling.markComputeAt();
+
                 string sanitized_g_out = get_sanitized_name(g_out.name());
                 sched.push_schedule(mem_handle.name(), mem.stage_num,
                                     "compute_at(" + sanitized_g_out + ", " + tile_inner_var.name() + ")",
