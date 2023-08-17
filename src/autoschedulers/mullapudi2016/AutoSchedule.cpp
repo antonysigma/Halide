@@ -1001,7 +1001,9 @@ public:
 private:
     Stage &f;
     const uint32_t stage_num;
+public:
     bool is_compute_at = false;
+private:
 
     using split_t = GPUTileHelper::split_t;
     std::map<std::string, split_t> parallelize;
@@ -1022,6 +1024,10 @@ private:
 
     bool isAlreadySplit(const std::string &variable_name) const {
         return has_split.find(variable_name) != has_split.end();
+    }
+
+    bool isUpdate() const {
+        return f.name().find("update") != std::string::npos;
     }
 
 public:
@@ -1070,33 +1076,40 @@ public:
     }
 
     void canReorder(const std::vector<VarOrRVar> &vars, AutoSchedule& sched) {
+        std::cerr << f.name() << ".reorder(" << vars.front().name();
         ordering = vars;
-        std::cerr << f.name() << ".reorder(" << ordering[0].name();
 
         for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
             std::cerr << ", " << iter->name();
         }
         std::cerr << ")\n";
-
-        std::set<std::string> var_list;
-        for (const auto &v : ordering) {
-            var_list.emplace(v.name());
-        }
-
-        std::stringstream oss;
-        oss << "reorder(" << ordering[0].name();
-        for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
-            oss << ", " << iter->name();
-        }
-        oss << ")";
-
-        f.reorder(ordering);
-        sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
     }
 
     void apply(AutoSchedule &sched) const {
-
         GPUTileHelper helper{f, stage_num};
+
+        if(!ordering.empty()) {
+            std::set<std::string> var_list;
+            for (const auto &v : ordering) {
+                var_list.emplace(v.name());
+            }
+
+            std::stringstream oss;
+            oss << "reorder(" << ordering[0].name();
+            for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
+                oss << ", " << iter->name();
+            }
+            oss << ")";
+
+            f.reorder(ordering);
+            sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
+        }
+
+        const bool is_scalar_reduction = parallelize.empty();
+        if (is_compute_at || (isUpdate() && !is_scalar_reduction)) {
+            // Bug: Scalar reduction: need single gpu thread.
+            return;
+        }
 
         // Mullapudi2016, Section 5.4: Additionally, we add two new parameters
         // TARGET_THREADS_PER_BLOCK and MAX_THREADS_PER_BLOCK whose val- ues are
@@ -1106,6 +1119,7 @@ public:
         Expr threads_budget = target_n_threads;
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
         for (const auto &v : ordering) {
+
             const auto &v_name = v.name();
             if (isInner(v_name)) {
                 // Mark as gpu theads and blocks;
@@ -3106,6 +3120,10 @@ void Partitioner::generate_group_cpu_schedule(
         user_warning << "Insufficient parallelism for " << f_handle.name() << "\n";
     }
 
+    if (t.has_gpu_feature()) {
+        gpu_tiling.apply(sched);
+    }
+
     // Find the level at which group members will be computed.
     int tile_inner_index = dims.size() - outer_dims.size() - 1;
     VarOrRVar tile_inner_var(Var::outermost());
@@ -3140,6 +3158,7 @@ void Partitioner::generate_group_cpu_schedule(
 
         // Get a function handle for scheduling the stage
         Stage mem_handle = Stage(Func(mem.func));
+        bool is_compute_at = false;
 
         if (mem.stage_num > 0) {
             mem_handle = Func(mem.func).update(mem.stage_num - 1);
@@ -3150,8 +3169,10 @@ void Partitioner::generate_group_cpu_schedule(
                 } else {
                     Func(mem.func).compute_at(Func(g_out), tile_inner_var.var);
                 }
+                is_compute_at = true;
 
                 string sanitized_g_out = get_sanitized_name(g_out.name());
+                std::cerr << mem_handle.name() << ".compute_at(" << sanitized_g_out << ")\n";
                 sched.push_schedule(mem_handle.name(), mem.stage_num,
                                     "compute_at(" + sanitized_g_out + ", " + tile_inner_var.name() + ")",
                                     {sanitized_g_out, tile_inner_var.name()});
@@ -3164,6 +3185,8 @@ void Partitioner::generate_group_cpu_schedule(
                 sched.push_schedule(mem_handle.name(), mem.stage_num, "compute_root()", {});
             }
         }
+        GPUTilingDedup gpu_tiling2{mem_handle, mem.stage_num};
+        gpu_tiling2.is_compute_at = is_compute_at;
 
         // Reorder the dimensions for better spatial locality. If we only have
         // one dimension (excluding __outermost), there is nothing to reorder.
@@ -3171,15 +3194,17 @@ void Partitioner::generate_group_cpu_schedule(
             map<string, Expr> mem_strides =
                 analyze_spatial_locality(mem, group_storage_bounds, inlines);
             if (!mem_strides.empty()) {
-                reorder_dims(mem_handle, mem.stage_num, mem_def, mem_strides, sched, t, gpu_tiling);
+                reorder_dims(mem_handle, mem.stage_num, mem_def, mem_strides, sched, t, gpu_tiling2);
             }
         }
 
         vectorize_stage(g, mem_handle, mem.stage_num, mem_def, mem.func, false,
-                        t, mem_rvars, mem_estimates, sched, gpu_tiling);
-    }
+                        t, mem_rvars, mem_estimates, sched, gpu_tiling2);
 
-    gpu_tiling.apply(sched);
+        if (t.has_gpu_feature()) {
+            gpu_tiling2.apply(sched);
+        }
+    }
 }
 
 void Partitioner::generate_cpu_schedule(const Target &t, AutoSchedule &sched) {
