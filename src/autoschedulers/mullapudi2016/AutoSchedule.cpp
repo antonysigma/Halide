@@ -1030,7 +1030,6 @@ public:
     }
 
     void canParallelize(VarOrRVar v, Expr factor) {
-        std::cerr << "canParallelize, var: " << v.name() << ", factor: " << factor << '\n';
         const std::string var = v.name();
 
         if(isOuter(var)) {
@@ -1040,14 +1039,14 @@ public:
             return;
         }
 
+        std::cerr << f.name() << ".parallel(" << v.name() << "," << factor << ")\n";
         VarOrRVar outer{var + "_o", v.is_rvar};
         VarOrRVar inner{var + "_i", v.is_rvar};
 
         parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
     }
 
-    void canVectorize(VarOrRVar v, Expr factor) {
-        std::cerr << "canVectorize, var: " << v.name() << ", factor: " << factor << '\n';
+    void canVectorize(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor) {
         const std::string var = v.name();
 
         if(isInner(var)) {
@@ -1057,14 +1056,12 @@ public:
             return;
         }
 
-        VarOrRVar outer{var + "_o", v.is_rvar};
-        VarOrRVar inner{var + "_i", v.is_rvar};
-
-        parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
+        std::cerr << f.name() << ".vectorize(" << v.name() << "," << factor << ")\n";
+        parallelize.try_emplace(var, split_t{std::move(v), std::move(vo), std::move(vi), factor, TailStrategy::Auto});
     }
 
     void hasSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
-        std::cerr << "hasSplit, var: " << v.name() << ", factor: " << factor << '\n';
+        std::cerr << f.name() << ".split(" << v.name() << "," << factor << ")\n";
         outer_vars.emplace(vo.name());
         inner_vars.emplace(vi.name());
         has_split.emplace(v.name());
@@ -1072,30 +1069,34 @@ public:
         parallelize.try_emplace(v.name(), split_t{std::move(v), std::move(vo), std::move(vi), factor, strategy});
     }
 
-    void canReorder(const std::vector<VarOrRVar> &vars) {
+    void canReorder(const std::vector<VarOrRVar> &vars, AutoSchedule& sched) {
         ordering = vars;
+        std::cerr << f.name() << ".reorder(" << ordering[0].name();
+
+        for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
+            std::cerr << ", " << iter->name();
+        }
+        std::cerr << ")\n";
+
+        std::set<std::string> var_list;
+        for (const auto &v : ordering) {
+            var_list.emplace(v.name());
+        }
+
+        std::stringstream oss;
+        oss << "reorder(" << ordering[0].name();
+        for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
+            oss << ", " << iter->name();
+        }
+        oss << ")";
+
+        f.reorder(ordering);
+        sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
     }
 
     void apply(AutoSchedule &sched) const {
 
         GPUTileHelper helper{f, stage_num};
-
-        if (!ordering.empty()) {
-            std::set<std::string> var_list;
-            for (const auto &v : ordering) {
-                var_list.emplace(v.name());
-            }
-
-            std::stringstream oss;
-            oss << "reorder(" << ordering[0].name();
-            for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
-                oss << ", " << iter->name();
-            }
-            oss << ")";
-
-            f.reorder(ordering);
-            sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
-        }
 
         // Mullapudi2016, Section 5.4: Additionally, we add two new parameters
         // TARGET_THREADS_PER_BLOCK and MAX_THREADS_PER_BLOCK whose val- ues are
@@ -2724,29 +2725,27 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
         internal_assert(is_rvar == dims[vec_dim_index].is_rvar());
 
         VarOrRVar vec_var(vec_dim_name, is_rvar);
-        if (t.has_gpu_feature()) {
-            gpu_tiling.canVectorize(vec_var, vec_len);
-            //f_handle.gpu_threads(vec_var);
-            //sched.push_schedule(f_handle.name(), stage_num,
-            //                    "gpu_threads(" + vec_var.name() + ")",
-            //                    {vec_var.name()});
-            //sched.push_schedule(f_handle.name(), stage_num,
-            //                    "gpu_blocks(" + split_vars.second.name() + ")",
-            //                    {split_vars.second.name()});
-        } else {
-            pair<VarOrRVar, VarOrRVar> split_vars =
-                split_dim(g, f_handle, stage_num, def, is_group_output, vec_var, vec_len,
-                          "_vi", "_vo", estimates, sched, t);
+        auto [inner, outer] = [&]() -> std::pair<VarOrRVar, VarOrRVar> {
+            if (t.has_gpu_feature()) {
+                VarOrRVar inner{vec_var.name() + "_vi", vec_var.is_rvar}, outer{vec_var.name() + "_vo", vec_var.is_rvar};
+                gpu_tiling.canVectorize(vec_var, outer, inner, vec_len);
+                return {inner, outer};
+            }
+
+            auto split_vars = split_dim(g, f_handle, stage_num, def, is_group_output, vec_var, vec_len,
+                        "_vi", "_vo", estimates, sched, t);
 
             f_handle.vectorize(split_vars.first);
             sched.push_schedule(f_handle.name(), stage_num,
                                 "vectorize(" + split_vars.first.name() + ")",
                                 {split_vars.first.name()});
-            if (is_rvar) {
-                rvars.erase(vec_dim_name);
-                rvars.insert(split_vars.first.name());
-                rvars.insert(split_vars.second.name());
-            }
+            return split_vars;
+        }();
+
+        if (is_rvar) {
+            rvars.erase(vec_dim_name);
+            rvars.insert(inner.name());
+            rvars.insert(outer.name());
         }
 
         // TODO: Reorder vector dim to innermost if it is the innermost
@@ -2877,7 +2876,7 @@ void Partitioner::reorder_dims(Stage f_handle, int stage_num, Definition def,
 
     if (dims != ordering) {
         if (t.has_gpu_feature()) {
-            gpu_tiling.canReorder(ordering);
+            gpu_tiling.canReorder(ordering, sched);
         } else {
             f_handle.reorder(ordering);
             sched.push_schedule(f_handle.name(), stage_num, "reorder(" + var_order + ")", var_list);
@@ -3029,7 +3028,7 @@ void Partitioner::generate_group_cpu_schedule(
 
         if (dims != ordering) {
             if (t.has_gpu_feature()) {
-                gpu_tiling.canReorder(ordering);
+                gpu_tiling.canReorder(ordering, sched);
             } else {
                 f_handle.reorder(ordering);
                 sched.push_schedule(f_handle.name(), g.output.stage_num,
@@ -3080,10 +3079,14 @@ void Partitioner::generate_group_cpu_schedule(
             if ((iter != stg_estimates.end()) && iter->second.defined()) {
                 if (!seq_var.empty()) {
                     VarOrRVar seq(seq_var, (rvars.find(seq_var) != rvars.end()));
+            if (t.has_gpu_feature()) {
+                gpu_tiling.canReorder({seq, v}, sched);
+            } else {
                     f_handle.reorder(seq, v);
                     sched.push_schedule(f_handle.name(), g.output.stage_num,
                                         "reorder(" + seq_var + ", " + var + ")",
-                                        {seq_var, var});
+                                            {seq_var, var});
+            }
                 }
                 if (t.has_gpu_feature()) {
                     gpu_tiling.canParallelize(v, iter->second);
