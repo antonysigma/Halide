@@ -1038,7 +1038,7 @@ public:
     void canParallelize(VarOrRVar v, Expr factor) {
         const std::string var = v.name();
 
-        if(isOuter(var)) {
+        if(isOuter(var) || isInner(var)) {
             // For CPU, it makes sense to mark the outer loop to execute in
             // parallel. But this operation is redundant in GPU as the gpu_block
             // is already specified.
