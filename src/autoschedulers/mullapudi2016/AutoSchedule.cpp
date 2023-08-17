@@ -929,7 +929,8 @@ public:
             const auto &[v, outer, inner, factor, strategy] = vars.front();
             f.gpu_tile(v, outer, inner, factor, strategy);
 
-            oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ", " << to_string(strategy) << ")";
+            oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
+            //oss << ", " << to_string(strategy) << ")";
             break;
         }
         case 2: {
