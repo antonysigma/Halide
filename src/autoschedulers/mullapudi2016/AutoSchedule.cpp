@@ -1108,6 +1108,12 @@ public:
                 break;
             }
 
+            const bool should_unroll = can_prove(entry.factor <= 1);
+            if (should_unroll) {
+                // Skip thread size of 1.
+                continue;
+            }
+
             //const Expr desired_factor = clamp(value, vmin, vmax);
             split_t new_entry{entry};
             new_entry.factor = simplify(min(threads_budget, new_entry.factor));
