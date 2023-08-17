@@ -1105,13 +1105,7 @@ public:
 
             if (isAlreadySplit(var)) {
                 // Skip dimensions that are already split in the main Mullapudi algorithm.
-                continue;
-            }
-
-            const bool should_unroll = can_prove(entry.factor <= 1);
-            if (should_unroll) {
-                // No point to generate a single thread block. Skipping
-                continue;
+                break;
             }
 
             //const Expr desired_factor = clamp(value, vmin, vmax);
