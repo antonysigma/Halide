@@ -880,25 +880,35 @@ struct AutoSchedule {
     }
 };
 
-class GPUTileHelper {
-    Stage &f;
-    const uint32_t stage_num;
+std::string_view to_string(TailStrategy strategy) {
+    switch (strategy) {
+    case TailStrategy::RoundUp:
+        return "TailStrategy::RoundUp";
+    case TailStrategy::GuardWithIf:
+        return "TailStrategy::GuardWithIf";
+    case TailStrategy::ShiftInwards:
+        return "TailStrategy::ShiftInwards";
+    case TailStrategy::Auto:
+        return "TailStrategy::Auto";
+    }
+}
 
+class GPUTileHelper {
+public:
     struct split_t {
         VarOrRVar v;
         VarOrRVar outer;
         VarOrRVar inner;
         Expr factor;
+        TailStrategy strategy;
     };
-    std::vector<split_t> vars;
 
-public:
     GPUTileHelper(Stage &_f, uint32_t n)
         : f(_f), stage_num(n) {
     }
 
-    void applySplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor) {
-        vars.emplace_back(split_t{std::move(v), std::move(vo), std::move(vi), std::move(factor)});
+    void applySplit(split_t&& x) {
+        vars.emplace_back(x);
     }
 
     void commit(AutoSchedule &sched) const {
@@ -913,15 +923,17 @@ public:
         std::stringstream oss;
         switch (vars.size()) {
         case 1: {
-            const auto &[v, outer, inner, factor] = vars.front();
-            f.gpu_tile(v, outer, inner, factor);
+            const auto &[v, outer, inner, factor, strategy] = vars.front();
+            f.gpu_tile(v, outer, inner, factor, strategy);
 
-            oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
+            oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ", " << to_string(strategy) << ")";
             break;
         }
         case 2: {
             const auto &x = vars.back();
             const auto &y = vars.front();
+            internal_assert(x.strategy == y.strategy);
+
             f.gpu_tile(x.v, y.v, x.outer, y.outer, x.inner, y.inner, x.factor, y.factor);
 
             oss << "gpu_tile("
@@ -969,43 +981,67 @@ public:
 
         sched.push_schedule(f.name(), stage_num, oss.str(), var_name);
     }
+   private:
+    Stage &f;
+    const uint32_t stage_num;
+
+    std::vector<split_t> vars;
 };
 
-class GPUTiling {
+class GPUTilingDedup {
     constexpr static int vmin = 32;
     constexpr static int vmax = 1024;
 
     Stage &f;
     const uint32_t stage_num;
     bool is_compute_at = false;
-    using tuple_t = std::tuple<VarOrRVar, Expr, TailStrategy>;
-    std::map<std::string, tuple_t> parallelize;
+
+    using split_t = GPUTileHelper::split_t;
+    std::map<std::string, split_t> parallelize;
 
     std::set<std::string> outer_vars;
-    std::set<std::string> splitted_vars;
+    std::set<std::string> inner_vars;
 
-    bool needSplitting(const std::string &variable_name) const {
-        return splitted_vars.find(variable_name) == splitted_vars.end();
-    }
+    std::set<std::string> splitted_vars;
 
     bool isOuter(const std::string &variable_name) const {
         return outer_vars.find(variable_name) != outer_vars.end();
     }
 
+    bool isInner(const std::string &variable_name) const {
+        return inner_vars.find(variable_name) != inner_vars.end();
+    }
+
 public:
-    GPUTiling(Stage &_f, uint32_t n)
+    GPUTilingDedup(Stage &_f, uint32_t n)
         : f(_f), stage_num(n) {
     }
 
     void canParallelize(VarOrRVar v, Expr factor) {
-        parallelize.try_emplace(v.name(), tuple_t{std::move(v), factor, TailStrategy::Auto});
+        const std::string var = v.name();
+
+        if(isOuter(var)) {
+            // For CPU, it makes sense to mark the outer loop to execute in
+            // parallel. But this operation is redundant in GPU.
+            return;
+        }
+
+        VarOrRVar outer{var + "_o", v.is_rvar};
+        VarOrRVar inner{var + "_i", v.is_rvar};
+
+        splitted_vars.emplace(var);
+        outer_vars.emplace(outer.name());
+        inner_vars.emplace(inner.name());
+
+        parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
     }
 
-    void canSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr len, TailStrategy strategy) {
+    void canSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
         splitted_vars.emplace(v.name());
         outer_vars.emplace(vo.name());
+        inner_vars.emplace(vi.name());
 
-        parallelize.try_emplace(v.name(), tuple_t{std::move(v), len, strategy});
+        parallelize.try_emplace(v.name(), split_t{std::move(v), std::move(vo), std::move(vi), factor, strategy});
     }
 
     void markComputeAt() {
@@ -1017,30 +1053,13 @@ public:
         Expr threads_budget = 32;
         GPUTileHelper helper{f, stage_num};
 
-        for (const auto [var, entry] : parallelize) {
-            const auto &[v, value, strategy] = entry;
-
-            if (isOuter(var)) {
-                f.gpu_blocks(v);
-                sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + var + ")", {var});
-                continue;
-            }
-
-            const auto inner = var + "_i";
-            const auto outer = var + "_o";
-            VarOrRVar v_i{inner, v.is_rvar}, v_o{outer, v.is_rvar};
-
-            if (!needSplitting(var)) {
-                f.gpu(v_o, v_i);
-                sched.push_schedule(f.name(), stage_num, "gpu(" + outer + ", " + inner + ")", {outer, inner});
-                continue;
-            }
-
+        // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
+        for (auto [var, entry] : parallelize) {
             //const Expr desired_factor = clamp(value, vmin, vmax);
-            const Expr factor = simplify(min(threads_budget, value));
+            //const Expr factor = simplify(min(threads_budget, desired_factor));
 
-            helper.applySplit(v, v_o, v_i, factor);
-            threads_budget = simplify(max(threads_budget / factor, 1));
+            helper.applySplit(std::move(entry));
+            //threads_budget = simplify(max(threads_budget / factor, 1));
         }
 
         helper.commit(sched);
@@ -1387,7 +1406,7 @@ struct Partitioner {
         const Group &g, Stage f_handle, int stage_num, const Definition &def,
         bool is_group_output, const VarOrRVar &v, const Expr &factor, const string &in_suffix,
         const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched,
-        const Target &t, GPUTiling *gpu_tiling = nullptr);
+        const Target &t, GPUTilingDedup *gpu_tiling = nullptr);
 
     // Loop over the dimensions of function stage 'f_handle' starting from innermost
     // and vectorize the first pure dimension encountered.
@@ -2505,7 +2524,7 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     const Group &g, Stage f_handle, int stage_num, const Definition &def,
     bool is_group_output, const VarOrRVar &v, const Expr &factor, const string &in_suffix,
     const string &out_suffix, map<string, Expr> &estimates, AutoSchedule &sched,
-    const Target &t, GPUTiling *gpu_tiling) {
+    const Target &t, GPUTilingDedup *gpu_tiling) {
     // Create new variables for the split dimensions
     string arg_name = v.name();
     string inner_name = arg_name + in_suffix;
@@ -2556,30 +2575,30 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
 
     if (t.has_gpu_feature() && gpu_tiling) {
         gpu_tiling->canSplit(v, outer, inner, factor, strategy);
-    }
+    } else {
+        f_handle.split(v, outer, inner, factor, strategy);
+        std::ostringstream oss;
+        oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
 
-    f_handle.split(v, outer, inner, factor, strategy);
-    std::ostringstream oss;
-    oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
-
-    switch (strategy) {
-    case TailStrategy::RoundUp:
-        oss << ", TailStrategy::RoundUp)";
-        break;
-    case TailStrategy::GuardWithIf:
-        oss << ", TailStrategy::GuardWithIf)";
-        break;
-    case TailStrategy::ShiftInwards:
-        oss << ", TailStrategy::ShiftInwards)";
-        break;
-    case TailStrategy::Auto:
-        oss << ")";
-        break;
-    default:
-        internal_error;
+        switch (strategy) {
+        case TailStrategy::RoundUp:
+            oss << ", TailStrategy::RoundUp)";
+            break;
+        case TailStrategy::GuardWithIf:
+            oss << ", TailStrategy::GuardWithIf)";
+            break;
+        case TailStrategy::ShiftInwards:
+            oss << ", TailStrategy::ShiftInwards)";
+            break;
+        case TailStrategy::Auto:
+            oss << ")";
+            break;
+        default:
+            internal_error;
+        }
+        sched.push_schedule(f_handle.name(), stage_num, oss.str(),
+                            {arg_name, outer_name, inner_name});
     }
-    sched.push_schedule(f_handle.name(), stage_num, oss.str(),
-                        {arg_name, outer_name, inner_name});
 
     const Expr &est = get_element(estimates, arg_name);
     internal_assert(est.defined());
@@ -2876,7 +2895,7 @@ void Partitioner::generate_group_cpu_schedule(
         dim_vars[d] = get_base_name(dims[d].var);
     }
 
-    GPUTiling gpu_tiling{f_handle, g.output.stage_num};
+    GPUTilingDedup gpu_tiling{f_handle, g.output.stage_num};
 
     // Apply tiling to output of the group
     for (const auto &var : dim_vars) {
