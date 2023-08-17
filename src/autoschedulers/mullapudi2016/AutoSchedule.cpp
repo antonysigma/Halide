@@ -890,6 +890,9 @@ std::string_view to_string(TailStrategy strategy) {
         return "TailStrategy::ShiftInwards";
     case TailStrategy::Auto:
         return "TailStrategy::Auto";
+    default:
+        internal_error;
+        return "";
     }
 }
 
@@ -2580,21 +2583,10 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
         std::ostringstream oss;
         oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
 
-        switch (strategy) {
-        case TailStrategy::RoundUp:
-            oss << ", TailStrategy::RoundUp)";
-            break;
-        case TailStrategy::GuardWithIf:
-            oss << ", TailStrategy::GuardWithIf)";
-            break;
-        case TailStrategy::ShiftInwards:
-            oss << ", TailStrategy::ShiftInwards)";
-            break;
-        case TailStrategy::Auto:
+        if (strategy == TailStrategy::Auto) {
             oss << ")";
-            break;
-        default:
-            internal_error;
+        } else {
+            oss << ", " << to_string(strategy) << ")";
         }
         sched.push_schedule(f_handle.name(), stage_num, oss.str(),
                             {arg_name, outer_name, inner_name});
