@@ -910,7 +910,7 @@ public:
         : f(_f), stage_num(n) {
     }
 
-    void applySplit(split_t&& x) {
+    void applySplit(const split_t &x) {
         vars.emplace_back(x);
     }
 
@@ -933,8 +933,8 @@ public:
             break;
         }
         case 2: {
-            const auto &x = vars.back();
-            const auto &y = vars.front();
+            const auto &x = vars.front();
+            const auto &y = vars.back();
             internal_assert(x.strategy == y.strategy);
 
             f.gpu_tile(x.v, y.v, x.outer, y.outer, x.inner, y.inner, x.factor, y.factor);
@@ -952,9 +952,9 @@ public:
             break;
         }
         case 3: {
-            const auto &x = vars[2];
+            const auto &x = vars[0];
             const auto &y = vars[1];
-            const auto &z = vars[0];
+            const auto &z = vars[2];
             f.gpu_tile(x.v, y.v, z.v, x.outer, y.outer, z.outer, x.inner, y.inner, z.inner, x.factor, y.factor, z.factor);
 
             oss << "gpu_tile("
@@ -1002,10 +1002,11 @@ class GPUTilingDedup {
     using split_t = GPUTileHelper::split_t;
     std::map<std::string, split_t> parallelize;
 
+    std::vector<VarOrRVar> ordering;
+
+    std::set<std::string> has_split;
     std::set<std::string> outer_vars;
     std::set<std::string> inner_vars;
-
-    std::set<std::string> splitted_vars;
 
     bool isOuter(const std::string &variable_name) const {
         return outer_vars.find(variable_name) != outer_vars.end();
@@ -1015,36 +1016,46 @@ class GPUTilingDedup {
         return inner_vars.find(variable_name) != inner_vars.end();
     }
 
+    bool isAlreadySplit(const std::string &variable_name) const {
+        return has_split.find(variable_name) != has_split.end();
+    }
+
 public:
     GPUTilingDedup(Stage &_f, uint32_t n)
         : f(_f), stage_num(n) {
     }
 
     void canParallelize(VarOrRVar v, Expr factor) {
+        std::cerr << "canParallelize, var: " << v.name() << ", factor: " << factor << '\n';
         const std::string var = v.name();
 
         if(isOuter(var)) {
             // For CPU, it makes sense to mark the outer loop to execute in
-            // parallel. But this operation is redundant in GPU.
+            // parallel. But this operation is redundant in GPU as the gpu_block
+            // is already specified.
             return;
         }
 
         VarOrRVar outer{var + "_o", v.is_rvar};
         VarOrRVar inner{var + "_i", v.is_rvar};
 
-        splitted_vars.emplace(var);
         outer_vars.emplace(outer.name());
         inner_vars.emplace(inner.name());
 
         parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
     }
 
-    void canSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
-        splitted_vars.emplace(v.name());
+    void hasSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
+        std::cerr << "hasSplit, var: " << v.name() << ", factor: " << factor << '\n';
         outer_vars.emplace(vo.name());
         inner_vars.emplace(vi.name());
+        has_split.emplace(v.name());
 
         parallelize.try_emplace(v.name(), split_t{std::move(v), std::move(vo), std::move(vi), factor, strategy});
+    }
+
+    void canReorder(const std::vector<VarOrRVar> &vars) {
+        ordering = vars;
     }
 
     void markComputeAt() {
@@ -1056,12 +1067,56 @@ public:
         Expr threads_budget = 32;
         GPUTileHelper helper{f, stage_num};
 
+        if (!ordering.empty()) {
+            std::set<std::string> var_list;
+            for (const auto &v : ordering) {
+                var_list.emplace(v.name());
+            }
+
+            std::stringstream oss;
+            oss << "reorder(" << ordering[0].name();
+            for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
+                oss << ", " << iter->name();
+            }
+            oss << ")";
+
+            f.reorder(ordering);
+            sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
+        }
+
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
-        for (auto [var, entry] : parallelize) {
+        for (const auto &v : ordering) {
+            const auto &v_name = v.name();
+            if (isInner(v_name)) {
+                // Mark as gpu theads and blocks;
+                //f.gpu_threads(v);
+                sched.push_schedule(f.name(), stage_num, "gpu_threads(" + v.name() + ")", {v_name});
+                continue;
+            }
+
+            if (isOuter(v_name)) {
+                // Mark as gpu theads and blocks;
+                //f.gpu_blocks(v);
+                sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v.name() + ")", {v_name});
+                continue;
+            }
+
+            const auto iter = parallelize.find(v_name);
+            if (iter == parallelize.end()) {
+                // Skip inner dimensions that are not parallelized.
+                continue;
+            }
+
+            const auto &[var, entry] = *iter;
+
+            if (isAlreadySplit(var)) {
+                // Skip dimensions that are already split in the main Mullapudi algorithm.
+                continue;
+            }
             //const Expr desired_factor = clamp(value, vmin, vmax);
             //const Expr factor = simplify(min(threads_budget, desired_factor));
 
-            helper.applySplit(std::move(entry));
+            helper.applySplit(entry);
             //threads_budget = simplify(max(threads_budget / factor, 1));
         }
 
@@ -1423,7 +1478,8 @@ struct Partitioner {
     // such that the dimension with the smallest access stride is innermost.
     // This takes the strides along each dimension as input.
     void reorder_dims(Stage f_handle, int stage_num, Definition def,
-                      map<string, Expr> strides, AutoSchedule &sched);
+                      map<string, Expr> strides, AutoSchedule &sched,
+                      const Target &t, GPUTilingDedup &gpu_tiling);
 
     // Helper functions to display partition information of the pipeline.
     void disp_pipeline_costs();
@@ -2577,20 +2633,20 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     }
 
     if (t.has_gpu_feature() && gpu_tiling) {
-        gpu_tiling->canSplit(v, outer, inner, factor, strategy);
-    } else {
-        f_handle.split(v, outer, inner, factor, strategy);
-        std::ostringstream oss;
-        oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
-
-        if (strategy == TailStrategy::Auto) {
-            oss << ")";
-        } else {
-            oss << ", " << to_string(strategy) << ")";
-        }
-        sched.push_schedule(f_handle.name(), stage_num, oss.str(),
-                            {arg_name, outer_name, inner_name});
+        gpu_tiling->hasSplit(v, outer, inner, factor, strategy);
     }
+
+    f_handle.split(v, outer, inner, factor, strategy);
+    std::ostringstream oss;
+    oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
+
+    if (strategy == TailStrategy::Auto) {
+        oss << ")";
+    } else {
+        oss << ", " << to_string(strategy) << ")";
+    }
+    sched.push_schedule(f_handle.name(), stage_num, oss.str(),
+                        {arg_name, outer_name, inner_name});
 
     const Expr &est = get_element(estimates, arg_name);
     internal_assert(est.defined());
@@ -2696,7 +2752,7 @@ inline bool operator!=(const vector<Dim> &dims, const vector<VarOrRVar> &orderin
 }
 
 void Partitioner::reorder_dims(Stage f_handle, int stage_num, Definition def,
-                               map<string, Expr> strides, AutoSchedule &sched) {
+                               map<string, Expr> strides, AutoSchedule &sched, const Target &t, GPUTilingDedup &gpu_tiling) {
     vector<Dim> &dims = def.schedule().dims();
     internal_assert(dims.size() > 1);
     vector<pair<string, int>> order;
@@ -2791,8 +2847,12 @@ void Partitioner::reorder_dims(Stage f_handle, int stage_num, Definition def,
     }
 
     if (dims != ordering) {
-        f_handle.reorder(ordering);
-        sched.push_schedule(f_handle.name(), stage_num, "reorder(" + var_order + ")", var_list);
+        if (t.has_gpu_feature()) {
+            gpu_tiling.canReorder(ordering);
+        } else {
+            f_handle.reorder(ordering);
+            sched.push_schedule(f_handle.name(), stage_num, "reorder(" + var_order + ")", var_list);
+        }
     }
 }
 
@@ -2871,6 +2931,8 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
+    GPUTilingDedup gpu_tiling{f_handle, g.output.stage_num};
+
     // Reorder the dimensions for better spatial locality (i.e. smallest stride
     // is innermost). If we only have one dimension (excluding __outermost),
     // there is nothing to reorder.
@@ -2878,7 +2940,7 @@ void Partitioner::generate_group_cpu_schedule(
         map<string, Expr> strides =
             analyze_spatial_locality(g.output, group_storage_bounds, inlines);
         if (!strides.empty()) {
-            reorder_dims(f_handle, g.output.stage_num, def, strides, sched);
+            reorder_dims(f_handle, g.output.stage_num, def, strides, sched, t, gpu_tiling);
         }
     }
 
@@ -2886,8 +2948,6 @@ void Partitioner::generate_group_cpu_schedule(
     for (int d = 0; d < (int)dims.size() - 1; d++) {
         dim_vars[d] = get_base_name(dims[d].var);
     }
-
-    GPUTilingDedup gpu_tiling{f_handle, g.output.stage_num};
 
     // Apply tiling to output of the group
     for (const auto &var : dim_vars) {
@@ -2939,9 +2999,13 @@ void Partitioner::generate_group_cpu_schedule(
         }
 
         if (dims != ordering) {
-            f_handle.reorder(ordering);
-            sched.push_schedule(f_handle.name(), g.output.stage_num,
-                                "reorder(" + var_order + ")", var_list);
+            if (t.has_gpu_feature()) {
+                gpu_tiling.canReorder(ordering);
+            } else {
+                f_handle.reorder(ordering);
+                sched.push_schedule(f_handle.name(), g.output.stage_num,
+                                    "reorder(" + var_order + ")", var_list);
+            }
         }
     }
 
@@ -3080,7 +3144,7 @@ void Partitioner::generate_group_cpu_schedule(
             map<string, Expr> mem_strides =
                 analyze_spatial_locality(mem, group_storage_bounds, inlines);
             if (!mem_strides.empty()) {
-                reorder_dims(mem_handle, mem.stage_num, mem_def, mem_strides, sched);
+                reorder_dims(mem_handle, mem.stage_num, mem_def, mem_strides, sched, t, gpu_tiling);
             }
         }
 
