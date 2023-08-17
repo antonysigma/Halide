@@ -917,6 +917,7 @@ public:
     void commit(AutoSchedule &sched) const {
         if (vars.empty()) {
             f.gpu_single_thread();
+            std::cerr << f.name() << ".gpu_single_thread()\n";
             sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
             return;
         }
@@ -1022,10 +1023,6 @@ private:
         return inner_vars.find(variable_name) != inner_vars.end();
     }
 
-    bool isAlreadySplit(const std::string &variable_name) const {
-        return has_split.find(variable_name) != has_split.end();
-    }
-
     bool isUpdate() const {
         return f.name().find("update") != std::string::npos;
     }
@@ -1117,6 +1114,7 @@ public:
         // auto-scheduler to avoid tiling configurations that generate too few
         // or too many threads per GPU thread block.
         Expr threads_budget = target_n_threads;
+        bool is_already_split = false;
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
         for (const auto &v : ordering) {
 
@@ -1125,6 +1123,8 @@ public:
                 // Mark as gpu theads and blocks;
                 f.gpu_threads(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_threads(" + v.name() + ")", {v_name});
+
+                is_already_split = true;
                 continue;
             }
 
@@ -1132,6 +1132,8 @@ public:
                 // Mark as gpu theads and blocks;
                 f.gpu_blocks(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v.name() + ")", {v_name});
+
+                is_already_split = true;
                 continue;
             }
 
@@ -1143,9 +1145,9 @@ public:
 
             const auto &[var, entry] = *iter;
 
-            if (isAlreadySplit(var)) {
+            if (is_already_split) {
                 // Skip dimensions that are already split in the main Mullapudi algorithm.
-                break;
+                continue;
             }
 
             const bool should_unroll = can_prove(entry.factor <= 1);
@@ -1162,7 +1164,9 @@ public:
             threads_budget = simplify(max(threads_budget / new_entry.factor, 1));
         }
 
-        helper.commit(sched);
+        if (!is_already_split) {
+            helper.commit(sched);
+        }
     }
 };
 
