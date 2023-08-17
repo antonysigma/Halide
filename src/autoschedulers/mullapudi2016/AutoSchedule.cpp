@@ -995,7 +995,8 @@ public:
 class GPUTilingDedup {
 public:
     constexpr static int vmin = 32;
-    constexpr static int vmax = 1024;
+    constexpr static int target_n_threads = 128;
+    constexpr static int vmax = 2048;
 
 private:
     Stage &f;
@@ -1096,7 +1097,12 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
-        Expr threads_budget = vmin;
+        // Mullapudi2016, Section 5.4: Additionally, we add two new parameters
+        // TARGET_THREADS_PER_BLOCK and MAX_THREADS_PER_BLOCK whose val- ues are
+        // set to 128 and 2048 respectively. These parameters enable the
+        // auto-scheduler to avoid tiling configurations that generate too few
+        // or too many threads per GPU thread block.
+        Expr threads_budget = target_n_threads;
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
         for (const auto &v : ordering) {
             const auto &v_name = v.name();
