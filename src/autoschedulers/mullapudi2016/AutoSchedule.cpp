@@ -883,65 +883,91 @@ struct AutoSchedule {
 class GPUTileHelper {
     Stage &f;
     const uint32_t stage_num;
-    AutoSchedule &sched;
 
-    std::vector<VarOrRVar> vo_list;
-    std::vector<VarOrRVar> vi_list;
-
-    std::vector<VarOrRVar> reorder() const {
-        std::vector<VarOrRVar> var_list;
-        std::copy(vi_list.rbegin(), vi_list.rend(), std::back_inserter(var_list));
-        std::copy(vo_list.rbegin(), vo_list.rend(), std::back_inserter(var_list));
-
-        return var_list;
-    }
+    struct split_t {
+        VarOrRVar v;
+        VarOrRVar outer;
+        VarOrRVar inner;
+        Expr factor;
+    };
+    std::vector<split_t> vars;
 
 public:
-    GPUTileHelper(Stage &_f, uint32_t n, AutoSchedule &s)
-        : f(_f), stage_num(n), sched(s) {
+    GPUTileHelper(Stage &_f, uint32_t n)
+        : f(_f), stage_num(n) {
     }
 
     void applySplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor) {
-        f.split(v, vo, vi, factor);
-
-        std::stringstream oss;
-        oss << "split(" << v.name() << ", " << vo.name() << ", " << vi.name() << ", " << factor << ")";
-        sched.push_schedule(f.name(), stage_num, oss.str(),
-                            {vo.name(), vi.name()});
-
-        f.gpu(vo, vi);
-        sched.push_schedule(f.name(), stage_num, "gpu(" + vo.name() + ", " + vi.name() + ")",
-                            {vo.name(), vi.name()});
-
-        vo_list.emplace_back(vo);
-        vi_list.emplace_back(vi);
+        vars.emplace_back(split_t{std::move(v), std::move(vo), std::move(vi), std::move(factor)});
     }
 
-    void applyReorder(Stage &f, uint32_t stage_num, AutoSchedule &sched) const {
-        if (vo_list.empty()) {
+    void commit(AutoSchedule &sched) const {
+        if (vars.empty()) {
             f.gpu_single_thread();
             sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
             return;
         }
 
+        assert(vars.size() <= 3);
+
         std::stringstream oss;
-        std::set<std::string> var_names;
+        switch (vars.size()) {
+        case 1: {
+            const auto &[v, outer, inner, factor] = vars.front();
+            f.gpu_tile(v, outer, inner, factor);
 
-        oss << "reorder(";
-        const auto reordered = reorder();
+            oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
+            break;
+        }
+        case 2: {
+            const auto &x = vars.back();
+            const auto &y = vars.front();
+            f.gpu_tile(x.v, y.v, x.outer, y.outer, x.inner, y.inner, x.factor, y.factor);
 
-        for (auto iter = reordered.begin(); iter != reordered.end(); iter++) {
-            oss << iter->name();
-            if (iter != reordered.end() - 1) {
-                oss << ", ";
-            }
-            var_names.emplace(iter->name());
+            oss << "gpu_tile("
+                << x.v.name() << ", "
+                << y.v.name() << ", "  //
+                << x.outer.name() << ", "
+                << y.outer.name() << ", "  //
+                << x.inner.name() << ", "
+                << y.inner.name() << ", "  //
+                << x.factor << ", "
+                << y.factor << ")";
+
+            break;
+        }
+        case 3: {
+            const auto &x = vars[2];
+            const auto &y = vars[1];
+            const auto &z = vars[0];
+            f.gpu_tile(x.v, y.v, z.v, x.outer, y.outer, z.outer, x.inner, y.inner, z.inner, x.factor, y.factor, z.factor);
+
+            oss << "gpu_tile("
+                << x.v.name() << ", "
+                << y.v.name() << ", "
+                << z.v.name() << ", "  //
+                << x.outer.name() << ", "
+                << y.outer.name() << ", "
+                << z.outer.name() << ", "  //
+                << x.inner.name() << ", "
+                << y.inner.name() << ", "
+                << z.inner.name() << ", "  //
+                << x.factor << ", "
+                << y.factor << ", "
+                << z.factor << ")";
+
+            break;
+        }
         }
 
-        oss << ")";
+        std::set<std::string> var_name;
+        for (const auto &x : vars) {
+            var_name.emplace(x.v.name());
+            var_name.emplace(x.outer.name());
+            var_name.emplace(x.inner.name());
+        }
 
-        f.reorder(reordered);
-        sched.push_schedule(f.name(), stage_num, oss.str(), var_names);
+        sched.push_schedule(f.name(), stage_num, oss.str(), var_name);
     }
 };
 
@@ -989,7 +1015,7 @@ public:
     void apply(AutoSchedule &sched) const {
 
         Expr threads_budget = 32;
-        GPUTileHelper helper{f, stage_num, sched};
+        GPUTileHelper helper{f, stage_num};
 
         for (const auto [var, entry] : parallelize) {
             const auto &[v, value, strategy] = entry;
@@ -1017,7 +1043,7 @@ public:
             threads_budget = simplify(max(threads_budget / factor, 1));
         }
 
-        helper.applyReorder(f, stage_num, sched);
+        helper.commit(sched);
     }
 };
 
