@@ -993,9 +993,11 @@ public:
 };
 
 class GPUTilingDedup {
+public:
     constexpr static int vmin = 32;
     constexpr static int vmax = 1024;
 
+private:
     Stage &f;
     const uint32_t stage_num;
     bool is_compute_at = false;
@@ -1094,7 +1096,7 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
-        Expr threads_budget = 32;
+        Expr threads_budget = vmin;
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
         for (const auto &v : ordering) {
             const auto &v_name = v.name();
@@ -2692,7 +2694,7 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
         vec_len = std::max(vec_len, t.natural_vector_size(type));
     }
     if (t.has_gpu_feature()) {
-        vec_len = std::clamp(vec_len, 32, 1024);
+        vec_len = std::clamp(vec_len, GPUTilingDedup::vmin, GPUTilingDedup::vmax);
     }
 
     for (int d = 0; d < (int)dims.size() - 1; d++) {
