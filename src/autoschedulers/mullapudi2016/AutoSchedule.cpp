@@ -1040,9 +1040,6 @@ public:
         VarOrRVar outer{var + "_o", v.is_rvar};
         VarOrRVar inner{var + "_i", v.is_rvar};
 
-        outer_vars.emplace(outer.name());
-        inner_vars.emplace(inner.name());
-
         parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
     }
 
@@ -1057,10 +1054,6 @@ public:
 
     void canReorder(const std::vector<VarOrRVar> &vars) {
         ordering = vars;
-    }
-
-    void markComputeAt() {
-        is_compute_at = true;
     }
 
     void apply(AutoSchedule &sched) const {
@@ -1090,14 +1083,14 @@ public:
             const auto &v_name = v.name();
             if (isInner(v_name)) {
                 // Mark as gpu theads and blocks;
-                //f.gpu_threads(v);
+                f.gpu_threads(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_threads(" + v.name() + ")", {v_name});
                 continue;
             }
 
             if (isOuter(v_name)) {
                 // Mark as gpu theads and blocks;
-                //f.gpu_blocks(v);
+                f.gpu_blocks(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v.name() + ")", {v_name});
                 continue;
             }
@@ -3131,7 +3124,6 @@ void Partitioner::generate_group_cpu_schedule(
                 } else {
                     Func(mem.func).compute_at(Func(g_out), tile_inner_var.var);
                 }
-                gpu_tiling.markComputeAt();
 
                 string sanitized_g_out = get_sanitized_name(g_out.name());
                 sched.push_schedule(mem_handle.name(), mem.stage_num,
