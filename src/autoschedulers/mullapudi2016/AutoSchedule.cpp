@@ -1043,6 +1043,23 @@ public:
         parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
     }
 
+    void canVectorize(VarOrRVar v, Expr factor) {
+        std::cerr << "canVectorize, var: " << v.name() << ", factor: " << factor << '\n';
+        const std::string var = v.name();
+
+        if(isInner(var)) {
+            // For CPU, it makes sense to further split the inner loop and run
+            // SIMD instruction. But this operation is redundant in GPU as the
+            // gpu_block is already specified.
+            return;
+        }
+
+        VarOrRVar outer{var + "_o", v.is_rvar};
+        VarOrRVar inner{var + "_i", v.is_rvar};
+
+        parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
+    }
+
     void hasSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
         std::cerr << "hasSplit, var: " << v.name() << ", factor: " << factor << '\n';
         outer_vars.emplace(vo.name());
@@ -1473,7 +1490,7 @@ struct Partitioner {
     void vectorize_stage(
         const Group &g, Stage f_handle, int stage_num, Definition def,
         const Function &func, bool is_group_output, const Target &t, set<string> &rvars,
-        map<string, Expr> &estimates, AutoSchedule &sched);
+        map<string, Expr> &estimates, AutoSchedule &sched, GPUTilingDedup& gpu_tiling);
 
     // Reorder the dimensions to preserve spatial locality. This function
     // checks the stride of each access. The dimensions of the loop are reordered
@@ -2663,7 +2680,8 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
 void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
                                   Definition def, const Function &func, bool is_group_output,
                                   const Target &t, set<string> &rvars,
-                                  map<string, Expr> &estimates, AutoSchedule &sched) {
+                                  map<string, Expr> &estimates, AutoSchedule &sched,
+                                  GPUTilingDedup& gpu_tiling) {
     vector<Dim> &dims = def.schedule().dims();
     int vec_dim_index = -1;
 
@@ -2699,6 +2717,7 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
 
         VarOrRVar vec_var(vec_dim_name, is_rvar);
         if (t.has_gpu_feature()) {
+            gpu_tiling.canVectorize(vec_var, vec_len);
             //f_handle.gpu_threads(vec_var);
             //sched.push_schedule(f_handle.name(), stage_num,
             //                    "gpu_threads(" + vec_var.name() + ")",
@@ -3011,10 +3030,8 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    if (!t.has_gpu_feature()) {
-        vectorize_stage(g, f_handle, g.output.stage_num, def, g_out, true, t,
-                        rvars, stg_estimates, sched);
-    }
+    vectorize_stage(g, f_handle, g.output.stage_num, def, g_out, true, t,
+                    rvars, stg_estimates, sched, gpu_tiling);
 
     // Parallelize definition
     Expr def_par = 1;
@@ -3073,8 +3090,6 @@ void Partitioner::generate_group_cpu_schedule(
             }
         }
     }
-
-    gpu_tiling.apply(sched);
 
     if (can_prove(def_par < arch_params.parallelism && def_par != 1)) {
         user_warning << "Insufficient parallelism for " << f_handle.name() << "\n";
@@ -3150,8 +3165,10 @@ void Partitioner::generate_group_cpu_schedule(
         }
 
         vectorize_stage(g, mem_handle, mem.stage_num, mem_def, mem.func, false,
-                        t, mem_rvars, mem_estimates, sched);
+                        t, mem_rvars, mem_estimates, sched, gpu_tiling);
     }
+
+    gpu_tiling.apply(sched);
 }
 
 void Partitioner::generate_cpu_schedule(const Target &t, AutoSchedule &sched) {
