@@ -1027,10 +1027,6 @@ public:
     }
 
     void canParallelize(VarOrRVar v, Expr factor) {
-        if (can_prove(factor <= 1)) {
-            // No point to generate a single thread gpu block. Skipping...
-            return;
-        }
         std::cerr << "canParallelize, var: " << v.name() << ", factor: " << factor << '\n';
         const std::string var = v.name();
 
@@ -1118,6 +1114,13 @@ public:
                 // Skip dimensions that are already split in the main Mullapudi algorithm.
                 continue;
             }
+
+            const bool should_unroll = can_prove(entry.factor <= 1);
+            if (should_unroll) {
+                // No point to generate a single thread block. Skipping
+                continue;
+            }
+
             //const Expr desired_factor = clamp(value, vmin, vmax);
             split_t new_entry{entry};
             new_entry.factor = simplify(min(threads_budget, new_entry.factor));
