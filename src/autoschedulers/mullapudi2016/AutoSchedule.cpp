@@ -1027,6 +1027,10 @@ public:
     }
 
     void canParallelize(VarOrRVar v, Expr factor) {
+        if (can_prove(factor <= 1)) {
+            // No point to generate a single thread gpu block. Skipping...
+            return;
+        }
         std::cerr << "canParallelize, var: " << v.name() << ", factor: " << factor << '\n';
         const std::string var = v.name();
 
@@ -1065,7 +1069,6 @@ public:
 
     void apply(AutoSchedule &sched) const {
 
-        Expr threads_budget = 32;
         GPUTileHelper helper{f, stage_num};
 
         if (!ordering.empty()) {
@@ -1085,6 +1088,7 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
+        Expr threads_budget = 32;
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
         for (const auto &v : ordering) {
             const auto &v_name = v.name();
@@ -1115,10 +1119,11 @@ public:
                 continue;
             }
             //const Expr desired_factor = clamp(value, vmin, vmax);
-            //const Expr factor = simplify(min(threads_budget, desired_factor));
+            split_t new_entry{entry};
+            new_entry.factor = simplify(min(threads_budget, new_entry.factor));
 
-            helper.applySplit(entry);
-            //threads_budget = simplify(max(threads_budget / factor, 1));
+            helper.applySplit(new_entry);
+            threads_budget = simplify(max(threads_budget / new_entry.factor, 1));
         }
 
         helper.commit(sched);
