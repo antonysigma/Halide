@@ -1000,11 +1000,9 @@ public:
     constexpr static int vmax = 2048;
 
 private:
+    const bool is_compute_at = false;
     Stage &f;
     const uint32_t stage_num;
-public:
-    bool is_compute_at = false;
-private:
 
     using split_t = GPUTileHelper::split_t;
     std::map<std::string, split_t> parallelize;
@@ -1028,8 +1026,8 @@ private:
     }
 
 public:
-    GPUTilingDedup(Stage &_f, uint32_t n)
-        : f(_f), stage_num(n) {
+    GPUTilingDedup(bool i, Stage &_f, uint32_t n)
+        : is_compute_at(i), f(_f), stage_num(n) {
     }
 
     void canParallelize(VarOrRVar v, Expr factor) {
@@ -1071,6 +1069,15 @@ public:
 
         parallelize.try_emplace(v.name(), split_t{std::move(v), std::move(vo), std::move(vi), factor, strategy});
     }
+    void setInitialOrder(const Func func) {
+        std::cerr << f.name() << ".initialOrder()\n";
+
+        ordering.clear();
+        for(const auto& v : func.args()) {
+            ordering.emplace_back(v);
+        }
+    }
+
 
     void canReorder(const std::vector<VarOrRVar> &vars, AutoSchedule& sched) {
         std::cerr << f.name() << ".reorder(" << vars.front().name();
@@ -1102,9 +1109,7 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
-        const bool is_scalar_reduction = parallelize.empty();
-        if (is_compute_at || (isUpdate() && !is_scalar_reduction)) {
-            // Bug: Scalar reduction: need single gpu thread.
+        if (is_compute_at) {
             return;
         }
 
@@ -1137,6 +1142,11 @@ public:
                 continue;
             }
 
+            if (is_already_split) {
+                // Skip dimensions that are already split in the main Mullapudi algorithm.
+                continue;
+            }
+
             const auto iter = parallelize.find(v_name);
             if (iter == parallelize.end()) {
                 // Skip inner dimensions that are not parallelized.
@@ -1144,11 +1154,6 @@ public:
             }
 
             const auto &[var, entry] = *iter;
-
-            if (is_already_split) {
-                // Skip dimensions that are already split in the main Mullapudi algorithm.
-                continue;
-            }
 
             const bool should_unroll = can_prove(entry.factor <= 1);
             if (should_unroll) {
@@ -2977,7 +2982,8 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    GPUTilingDedup gpu_tiling{f_handle, g.output.stage_num};
+    GPUTilingDedup gpu_tiling{false, f_handle, g.output.stage_num};
+    gpu_tiling.setInitialOrder(Func(g_out));
 
     // Reorder the dimensions for better spatial locality (i.e. smallest stride
     // is innermost). If we only have one dimension (excluding __outermost),
@@ -3162,7 +3168,6 @@ void Partitioner::generate_group_cpu_schedule(
 
         // Get a function handle for scheduling the stage
         Stage mem_handle = Stage(Func(mem.func));
-        bool is_compute_at = false;
 
         if (mem.stage_num > 0) {
             mem_handle = Func(mem.func).update(mem.stage_num - 1);
@@ -3173,7 +3178,6 @@ void Partitioner::generate_group_cpu_schedule(
                 } else {
                     Func(mem.func).compute_at(Func(g_out), tile_inner_var.var);
                 }
-                is_compute_at = true;
 
                 string sanitized_g_out = get_sanitized_name(g_out.name());
                 std::cerr << mem_handle.name() << ".compute_at(" << sanitized_g_out << ")\n";
@@ -3189,8 +3193,8 @@ void Partitioner::generate_group_cpu_schedule(
                 sched.push_schedule(mem_handle.name(), mem.stage_num, "compute_root()", {});
             }
         }
-        GPUTilingDedup gpu_tiling2{mem_handle, mem.stage_num};
-        gpu_tiling2.is_compute_at = is_compute_at;
+        GPUTilingDedup gpu_tiling2{true, mem_handle, mem.stage_num};
+        gpu_tiling2.setInitialOrder(Func(mem.func));
 
         // Reorder the dimensions for better spatial locality. If we only have
         // one dimension (excluding __outermost), there is nothing to reorder.
