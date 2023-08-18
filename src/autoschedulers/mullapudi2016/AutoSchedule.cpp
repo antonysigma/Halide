@@ -914,7 +914,7 @@ public:
         vars.emplace_back(x);
     }
 
-    void commit(AutoSchedule &sched) const {
+    void commit(AutoSchedule &sched, bool is_compute_at) const {
         if (vars.empty()) {
             f.gpu_single_thread();
             std::cerr << f.name() << ".gpu_single_thread()\n";
@@ -928,7 +928,12 @@ public:
         switch (vars.size()) {
         case 1: {
             const auto &[v, outer, inner, factor, strategy] = vars.front();
-            f.gpu_tile(v, outer, inner, factor, strategy);
+            f.split(v, outer, inner, factor, strategy);
+            if (is_compute_at) {
+                f.gpu_threads(inner);
+            } else {
+                f.gpu(outer, inner);
+            }
 
             oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
             //oss << ", " << to_string(strategy) << ")";
@@ -939,7 +944,14 @@ public:
             const auto &y = vars.back();
             internal_assert(x.strategy == y.strategy);
 
-            f.gpu_tile(x.v, y.v, x.outer, y.outer, x.inner, y.inner, x.factor, y.factor);
+            f.tile(x.v, y.v, x.outer, y.outer, x.inner, y.inner, x.factor, y.factor);
+            if (is_compute_at) {
+                f.gpu_threads(x.inner);
+                f.gpu_threads(y.inner);
+            } else {
+                f.gpu(x.outer, x.inner);
+                f.gpu(y.outer, y.inner);
+            }
 
             oss << "gpu_tile("
                 << x.v.name() << ", "
@@ -958,6 +970,15 @@ public:
             const auto &y = vars[1];
             const auto &z = vars[2];
             f.gpu_tile(x.v, y.v, z.v, x.outer, y.outer, z.outer, x.inner, y.inner, z.inner, x.factor, y.factor, z.factor);
+            if (is_compute_at) {
+                f.gpu_threads(x.inner);
+                f.gpu_threads(y.inner);
+                f.gpu_threads(z.inner);
+            } else {
+                f.gpu(x.outer, x.inner);
+                f.gpu(y.outer, y.inner);
+                f.gpu(z.outer, z.inner);
+            }
 
             oss << "gpu_tile("
                 << x.v.name() << ", "
@@ -986,6 +1007,7 @@ public:
 
         sched.push_schedule(f.name(), stage_num, oss.str(), var_name);
     }
+
    private:
     Stage &f;
     const uint32_t stage_num;
@@ -1109,10 +1131,6 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
-        if (is_compute_at) {
-            return;
-        }
-
         // Mullapudi2016, Section 5.4: Additionally, we add two new parameters
         // TARGET_THREADS_PER_BLOCK and MAX_THREADS_PER_BLOCK whose val- ues are
         // set to 128 and 2048 respectively. These parameters enable the
@@ -1133,7 +1151,7 @@ public:
                 continue;
             }
 
-            if (isOuter(v_name)) {
+            if (isOuter(v_name) && !is_compute_at) {
                 // Mark as gpu theads and blocks;
                 f.gpu_blocks(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v.name() + ")", {v_name});
@@ -1170,7 +1188,8 @@ public:
         }
 
         if (!is_already_split) {
-            helper.commit(sched);
+            // TODO(Antony): gpu_threads only when is_compute_at
+            helper.commit(sched, is_compute_at);
         }
     }
 };
