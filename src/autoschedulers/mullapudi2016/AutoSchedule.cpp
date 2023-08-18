@@ -1079,7 +1079,7 @@ public:
     }
 
 
-    void canReorder(const std::vector<VarOrRVar> &vars, AutoSchedule& sched) {
+    void canReorder(const std::vector<VarOrRVar> &vars) {
         std::cerr << f.name() << ".reorder(" << vars.front().name();
         ordering = vars;
 
@@ -2899,7 +2899,7 @@ void Partitioner::reorder_dims(Stage f_handle, int stage_num, Definition def,
 
     if (dims != ordering) {
         if (t.has_gpu_feature()) {
-            gpu_tiling.canReorder(ordering, sched);
+            gpu_tiling.canReorder(ordering);
         } else {
             f_handle.reorder(ordering);
             sched.push_schedule(f_handle.name(), stage_num, "reorder(" + var_order + ")", var_list);
@@ -3052,7 +3052,7 @@ void Partitioner::generate_group_cpu_schedule(
 
         if (dims != ordering) {
             if (t.has_gpu_feature()) {
-                gpu_tiling.canReorder(ordering, sched);
+                gpu_tiling.canReorder(ordering);
             } else {
                 f_handle.reorder(ordering);
                 sched.push_schedule(f_handle.name(), g.output.stage_num,
@@ -3104,7 +3104,7 @@ void Partitioner::generate_group_cpu_schedule(
                 if (!seq_var.empty()) {
                     VarOrRVar seq(seq_var, (rvars.find(seq_var) != rvars.end()));
             if (t.has_gpu_feature()) {
-                gpu_tiling.canReorder({seq, v}, sched);
+                gpu_tiling.canReorder({seq, v});
             } else {
                     f_handle.reorder(seq, v);
                     sched.push_schedule(f_handle.name(), g.output.stage_num,
