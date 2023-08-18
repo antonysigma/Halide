@@ -22,7 +22,7 @@
 // causes you to be able to just edit the files without having to recompile Halide
 // and then rerun your generator.
 // For distribution purposes, they should be inlined, and this define should be on 1.
-#define INLINE_TEMPLATES 1
+#define INLINE_TEMPLATES 0
 
 #if !INLINE_TEMPLATES
 #include <filesystem>
@@ -2358,16 +2358,15 @@ private:
     void generate_head(const Module &m) {
         stream << "<head>\n";
         stream << "<title>Halide Module: " << m.name() << "</title>\n";
-        stream << halide_html_template_StmtToHTML_dependencies_html;
 #if INLINE_TEMPLATES
         stream << "<style type='text/css'>\n"
                << halide_html_template_StmtToHTML_css
                << "\n</style>\n";
 #else
-        std::filesystem::path dir = std::filesystem::path(__FILE__).parent_path() / "irvisualizer";
+        std::filesystem::path dir = std::filesystem::path(__FILE__).parent_path() / "irvisualizer" / "dist";
         debug(1) << "Will link CSS in directory: " << dir << "\n";
         internal_assert(std::filesystem::exists(dir));
-        stream << "<link rel='stylesheet' href='file://" << (dir / "html_template_StmtToHTML.css").string() << "'>\n";
+        stream << "<link rel='stylesheet' href='file://" << (dir / "StmtToHTML.css").string() << "'>\n";
 #endif
         stream << "</head>\n";
     }
@@ -2386,10 +2385,10 @@ private:
                << halide_html_template_StmtToHTML_js
                << "</script>";
 #else
-        std::filesystem::path dir = std::filesystem::path(__FILE__).parent_path() / "irvisualizer";
+        std::filesystem::path dir = std::filesystem::path(__FILE__).parent_path() / "irvisualizer" / "dist";
         debug(1) << "Will link Javascript in directory: " << dir << "\n";
         internal_assert(std::filesystem::exists(dir));
-        stream << "<script src='file://" << (dir / "html_template_StmtToHTML.js").string() << "'></script>\n";
+        stream << "<script src='file://" << (dir / "StmtToHTML.js").string() << "'></script>\n";
 #endif
         stream << "</body>";
     }
