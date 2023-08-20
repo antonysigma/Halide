@@ -1134,6 +1134,11 @@ public:
         }
 
         std::cerr << f.name() << ".vectorize(" << v.name() << "," << factor << ")\n";
+        if(is_compute_at) {
+            inner_vars.emplace(v.name());
+            return;
+        }
+
         parallelize.try_emplace(var, split_t{std::move(v), std::move(vo), std::move(vi), factor, TailStrategy::Auto});
     }
 
