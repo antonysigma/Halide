@@ -896,8 +896,10 @@ std::string_view to_string(TailStrategy strategy) {
     }
 }
 
+/** Apply gpu_threads and gpu_blocks as an atomic transaction. */
 class GPUTileHelper {
 public:
+    /** A data structure documenting the split factor and tail strategy. */
     struct split_t {
         VarOrRVar v;
         VarOrRVar outer;
@@ -910,12 +912,20 @@ public:
         : f(_f), stage_num(n) {
     }
 
+    /** Indicate the need to split the dimensions with `gpu_tile()` method. */
     void applySplit(const split_t &x) {
         vars.emplace_back(x);
     }
 
+    /** Apply Halide schedules.
+     * @param[in] sched schedule header file code printer
+     * @param[in] is_compute_at whether the current stage is computed at another stage.
+    */
     void commit(AutoSchedule &sched, bool is_compute_at) const {
         if (vars.empty()) {
+            /** When split dimensions are not specified, implement the compute
+             * in a single GPU thread. Examples are: scalar reduction, scalar
+             * data copy. */
             f.gpu_single_thread();
             std::cerr << f.name() << ".gpu_single_thread()\n";
             sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
@@ -929,6 +939,11 @@ public:
         case 1: {
             const auto &[v, outer, inner, factor, strategy] = vars.front();
             f.split(v, outer, inner, factor, strategy);
+
+            /** When the current stage is computed_at another stage, we assume
+             * the `gpu_blocks()` is already defined. We implement the
+             * vectorization feature as `gpu_threads()`.
+            */
             if (is_compute_at) {
                 f.gpu_threads(inner);
             } else {
@@ -936,7 +951,6 @@ public:
             }
 
             oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
-            //oss << ", " << to_string(strategy) << ")";
             break;
         }
         case 2: {
@@ -1015,6 +1029,21 @@ public:
     std::vector<split_t> vars;
 };
 
+/** Idempotent Halide scheduling for GPU.
+ *
+ * The Halide scheduling methods parallel() and vectorize() is tolerant to the
+ * reorder() operations. Mullapudi2016 algorithm utilizes such feature to
+ * decouple the auto-vectorization algorithm from the auto-split algorithm. The
+ * latter reorders the dimensions extensively to maximize spatial locality.
+ *
+ * However, the gpu_threads() must be in the inner dimensions of gpu_blocks().
+ * These calls are sensitive to the dimension orders; once the Func is splitted,
+ * it cannot be reordered without failing internal assertions.
+ *
+ * This class is designed to intercept these Halide scheduling calls to make
+ * them indempotent; the Halide schedules methods are called only once no matter
+ * how the dimensions are reordered repeatedly.
+ */
 class GPUTilingDedup {
 public:
     constexpr static int vmin = 32;
@@ -1035,10 +1064,12 @@ private:
     std::set<std::string> outer_vars;
     std::set<std::string> inner_vars;
 
+    /** True if Func::parallelize(v_o) is already handled by gpu_blocks() before. */
     bool isOuter(const std::string &variable_name) const {
         return outer_vars.find(variable_name) != outer_vars.end();
     }
 
+    /** True if Func::vectorize(v_i) is already handled by gpu_threads() before. */
     bool isInner(const std::string &variable_name) const {
         return inner_vars.find(variable_name) != inner_vars.end();
     }
@@ -1052,6 +1083,10 @@ public:
         : is_compute_at(i), f(_f), stage_num(n) {
     }
 
+    /** Indicate the desire to Func::parallel(v_o).
+     * @param[in] v dimension to parallelize.
+     * @param[in] factor expected extent of the dimension.
+    */
     void canParallelize(VarOrRVar v, Expr factor) {
         const std::string var = v.name();
 
@@ -1069,6 +1104,12 @@ public:
         parallelize.try_emplace(var, split_t{std::move(v), std::move(outer), std::move(inner), factor, TailStrategy::Auto});
     }
 
+    /** Indicate the desire to Func::vectorize(v_i). 
+     * @param[in] v dimension to vectorize.
+     * @param[in] vo split into outer dimension
+     * @param[in] vi split into inner dimension
+     * @param[in] factor the partition size.
+    */
     void canVectorize(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor) {
         const std::string var = v.name();
 
@@ -1083,6 +1124,19 @@ public:
         parallelize.try_emplace(var, split_t{std::move(v), std::move(vo), std::move(vi), factor, TailStrategy::Auto});
     }
 
+    /** Mark the current dimension is already splitted by Mullapudi2016's
+     * auto-tiling algorithm. 
+     *
+     * Unlike canVectorize() and canParallelize(), we do not intercept the calls
+     * to split() in the main algorithm. Mullapudi2016 will reorder the split
+     * dimensions `v_i` and `v_o` to maximize spatial locality.
+     * 
+     * @param[in] v dimension that is already split.
+     * @param[in] v_o outer dimension
+     * @param[in] v_i inner dimension
+     * @param[in] factor partition size
+     * @param[in] strategy tail strategy (unused).
+    */
     void hasSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
         std::cerr << f.name() << ".split(" << v.name() << "," << factor << ")\n";
         outer_vars.emplace(vo.name());
@@ -1091,6 +1145,8 @@ public:
 
         parallelize.try_emplace(v.name(), split_t{std::move(v), std::move(vo), std::move(vi), factor, strategy});
     }
+
+    /** Indicate the default dimension order of the Func. */
     void setInitialOrder(const Func func) {
         std::cerr << f.name() << ".initialOrder()\n";
 
@@ -1100,7 +1156,14 @@ public:
         }
     }
 
-
+    /** Indicate to desire to reorder the dimensions. 
+     *
+     * Func::reorder() is called by the auto-parallelization algorithm multiple
+     * times, as it seeks to over-subscribe the available CPU cores
+     * aggressively. For GPU schedule, we only need the very last reorder() call
+     * to map the tile orders. Here, we always cache the current dimension
+     * order, and override the previous ones.
+    */
     void canReorder(const std::vector<VarOrRVar> &vars) {
         std::cerr << f.name() << ".reorder(" << vars.front().name();
         ordering = vars;
@@ -1111,6 +1174,7 @@ public:
         std::cerr << ")\n";
     }
 
+    /** Generate Halide GPU schedules. */
     void apply(AutoSchedule &sched) const {
         GPUTileHelper helper{f, stage_num};
 
@@ -1131,11 +1195,12 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
-        // Mullapudi2016, Section 5.4: Additionally, we add two new parameters
-        // TARGET_THREADS_PER_BLOCK and MAX_THREADS_PER_BLOCK whose val- ues are
-        // set to 128 and 2048 respectively. These parameters enable the
-        // auto-scheduler to avoid tiling configurations that generate too few
-        // or too many threads per GPU thread block.
+        /** Mullapudi2016, Section 5.4: Additionally, we add two new parameters
+        * TARGET_THREADS_PER_BLOCK and MAX_THREADS_PER_BLOCK whose val- ues are
+        * set to 128 and 2048 respectively. These parameters enable the
+        * auto-scheduler to avoid tiling configurations that generate too few or
+        * too many threads per GPU thread block.
+        */
         Expr threads_budget = target_n_threads;
         bool is_already_split = false;
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
