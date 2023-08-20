@@ -1071,6 +1071,7 @@ private:
     using split_t = GPUTileHelper::split_t;
     std::map<std::string, split_t> parallelize;
 
+    bool is_initial_order = true;
     std::vector<VarOrRVar> ordering;
 
     std::set<std::string> has_split;
@@ -1185,6 +1186,7 @@ public:
     void canReorder(const std::vector<VarOrRVar> &vars) {
         std::cerr << f.name() << ".reorder(" << vars.front().name();
         ordering = vars;
+        is_initial_order = false;
 
         for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
             std::cerr << ", " << iter->name();
@@ -1196,7 +1198,7 @@ public:
     void apply(AutoSchedule &sched) const {
         GPUTileHelper helper{f, stage_num};
 
-        if(!ordering.empty()) {
+        if(!ordering.empty() && !is_initial_order) {
             std::set<std::string> var_list;
             for (const auto &v : ordering) {
                 var_list.emplace(v.name());
