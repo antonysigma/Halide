@@ -939,6 +939,7 @@ public:
         case 1: {
             const auto &[v, outer, inner, factor, strategy] = vars.front();
             f.split(v, outer, inner, factor, strategy);
+            oss << "split(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
 
             /** When the current stage is computed_at another stage, we assume
              * the `gpu_blocks()` is already defined. We implement the
@@ -946,11 +947,12 @@ public:
             */
             if (is_compute_at) {
                 f.gpu_threads(inner);
+                oss << ".gpu_threads(" << inner.name() << ")";
             } else {
                 f.gpu(outer, inner);
+                oss << "gpu(" << outer.name() << ", " << inner.name() << ")";
             }
 
-            oss << "gpu_tile(" << v.name() << ", " << outer.name() << ", " << inner.name() << ", " << factor << ")";
             break;
         }
         case 2: {
@@ -959,15 +961,7 @@ public:
             internal_assert(x.strategy == y.strategy);
 
             f.tile(x.v, y.v, x.outer, y.outer, x.inner, y.inner, x.factor, y.factor);
-            if (is_compute_at) {
-                f.gpu_threads(x.inner);
-                f.gpu_threads(y.inner);
-            } else {
-                f.gpu(x.outer, x.inner);
-                f.gpu(y.outer, y.inner);
-            }
-
-            oss << "gpu_tile("
+            oss << "tile("
                 << x.v.name() << ", "
                 << y.v.name() << ", "  //
                 << x.outer.name() << ", "
@@ -977,36 +971,55 @@ public:
                 << x.factor << ", "
                 << y.factor << ")";
 
+            if (is_compute_at) {
+                f.gpu_threads(x.inner);
+                f.gpu_threads(y.inner);
+                oss << ".gpu_threads(" << x.inner.name() << ")";
+                oss << ".gpu_threads(" << y.inner.name() << ")";
+            } else {
+                f.gpu(x.outer, x.inner);
+                f.gpu(y.outer, y.inner);
+                oss << ".gpu(" << x.outer.name() << ", " << x.inner.name() << ")";
+                oss << ".gpu(" << y.outer.name() << ", " << y.inner.name() << ")";
+            }
+
             break;
         }
         case 3: {
             const auto &x = vars[0];
             const auto &y = vars[1];
             const auto &z = vars[2];
-            f.gpu_tile(x.v, y.v, z.v, x.outer, y.outer, z.outer, x.inner, y.inner, z.inner, x.factor, y.factor, z.factor);
+            f.tile({x.v, y.v, z.v}, {x.outer, y.outer, z.outer}, {x.inner, y.inner, z.inner}, {x.factor, y.factor, z.factor});
+
+            oss << "tile({"
+                << x.v.name() << ", "
+                << y.v.name() << ", "
+                << z.v.name() << "}, "  //
+                << x.outer.name() << "}, {"
+                << y.outer.name() << ", "
+                << z.outer.name() << "}, {"  //
+                << x.inner.name() << ", "
+                << y.inner.name() << ", "
+                << z.inner.name() << "}, {"  //
+                << x.factor << ", "
+                << y.factor << ", "
+                << z.factor << "})";
+
             if (is_compute_at) {
                 f.gpu_threads(x.inner);
                 f.gpu_threads(y.inner);
                 f.gpu_threads(z.inner);
+                oss << ".gpu_threads(" << x.inner.name() << ")";
+                oss << ".gpu_threads(" << y.inner.name() << ")";
+                oss << ".gpu_threads(" << z.inner.name() << ")";
             } else {
                 f.gpu(x.outer, x.inner);
                 f.gpu(y.outer, y.inner);
                 f.gpu(z.outer, z.inner);
+                oss << ".gpu(" << x.outer.name() << ", " << x.inner.name() << ")";
+                oss << ".gpu(" << y.outer.name() << ", " << y.inner.name() << ")";
+                oss << ".gpu(" << z.outer.name() << ", " << z.inner.name() << ")";
             }
-
-            oss << "gpu_tile("
-                << x.v.name() << ", "
-                << y.v.name() << ", "
-                << z.v.name() << ", "  //
-                << x.outer.name() << ", "
-                << y.outer.name() << ", "
-                << z.outer.name() << ", "  //
-                << x.inner.name() << ", "
-                << y.inner.name() << ", "
-                << z.inner.name() << ", "  //
-                << x.factor << ", "
-                << y.factor << ", "
-                << z.factor << ")";
 
             break;
         }
