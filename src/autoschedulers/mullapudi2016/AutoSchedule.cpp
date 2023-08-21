@@ -2825,13 +2825,19 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
 
     // Set the vector length as the maximum of the natural vector size of all
     // values produced by the function.
-    int vec_len = 0;
-    for (const auto &type : func.output_types()) {
-        vec_len = std::max(vec_len, t.natural_vector_size(type));
-    }
-    if (t.has_gpu_feature()) {
-        vec_len = std::clamp(vec_len, GPUTilingDedup::vmin, GPUTilingDedup::vmax);
-    }
+    auto vec_len = [&]() -> const int {
+        if(t.has_gpu_feature()) {
+            return GPUTilingDedup::target_n_threads;
+        }
+
+        const auto& types = func.output_types();
+
+        int vec_len = 0;
+        for(const auto& type : func.output_types()) {
+            vec_len += t.natural_vector_size(type);
+        }
+        return vec_len;
+    }();
 
     for (int d = 0; d < (int)dims.size() - 1; d++) {
         string dim_name = get_base_name(dims[d].var);
