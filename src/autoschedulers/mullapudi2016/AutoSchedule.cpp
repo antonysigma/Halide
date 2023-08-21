@@ -1136,6 +1136,9 @@ public:
 
         std::cerr << f.name() << ".vectorize(" << v.name() << "," << factor << ")\n";
         if(is_compute_at) {
+            // If the current Stage is compute_at() another Stage G, then the
+            // vectorized dimension is treated as a thread in GPU. No need to
+            // further split it to match the natural_vector_size() of CPUs.
             inner_vars.emplace(v.name());
             return;
         }
@@ -1264,7 +1267,6 @@ public:
                 continue;
             }
 
-            //const Expr desired_factor = clamp(value, vmin, vmax);
             split_t new_entry{entry};
             new_entry.factor = simplify(min(threads_budget, new_entry.factor));
 
