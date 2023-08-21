@@ -927,7 +927,7 @@ public:
              * in a single GPU thread. Examples are: scalar reduction, scalar
              * data copy. */
             f.gpu_single_thread();
-            std::cerr << f.name() << ".gpu_single_thread()\n";
+            debug(2) << f.name() << ".gpu_single_thread()\n";
             sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
             return;
         }
@@ -1132,7 +1132,7 @@ public:
             return;
         }
 
-        std::cerr << f.name() << ".parallel(" << v.name() << "," << factor << ")\n";
+        debug(2) << f.name() << ".parallel(" << v.name() << "," << factor << ")\n";
         VarOrRVar outer{var + "_o", v.is_rvar};
         VarOrRVar inner{var + "_i", v.is_rvar};
 
@@ -1155,7 +1155,7 @@ public:
             return;
         }
 
-        std::cerr << f.name() << ".vectorize(" << v.name() << "," << factor << ")\n";
+        debug(2) << f.name() << ".vectorize(" << v.name() << "," << factor << ")\n";
         if(is_compute_at) {
             // If the current Stage is compute_at() another Stage G, then the
             // vectorized dimension is treated as a thread in GPU. No need to
@@ -1181,7 +1181,7 @@ public:
      * @param[in] strategy tail strategy (unused).
     */
     void hasSplit(VarOrRVar v, VarOrRVar vo, VarOrRVar vi, Expr factor, TailStrategy strategy) {
-        std::cerr << f.name() << ".split(" << v.name() << "," << factor << ")\n";
+        debug(2) << f.name() << ".split(" << v.name() << "," << factor << ")\n";
         outer_vars.emplace(vo.name());
         inner_vars.emplace(vi.name());
         has_split.emplace(v.name());
@@ -1191,7 +1191,7 @@ public:
 
     /** Indicate the default dimension order of the Func. */
     void setInitialOrder(const Func func) {
-        std::cerr << f.name() << ".initialOrder()\n";
+        debug(2) << f.name() << ".initialOrder()\n";
 
         ordering.clear();
         for(const auto& v : func.args()) {
@@ -1208,14 +1208,14 @@ public:
      * order, and override the previous ones.
     */
     void canReorder(const std::vector<VarOrRVar> &vars) {
-        std::cerr << f.name() << ".reorder(" << vars.front().name();
+        debug(2) << f.name() << ".reorder(" << vars.front().name();
         ordering = vars;
         is_initial_order = false;
 
         for (auto iter = ordering.begin() + 1; iter != ordering.end(); ++iter) {
-            std::cerr << ", " << iter->name();
+            debug(2) << ", " << iter->name();
         }
-        std::cerr << ")\n";
+        debug(2) << ")\n";
     }
 
     /** Generate Halide GPU schedules. */
@@ -3298,7 +3298,7 @@ void Partitioner::generate_group_cpu_schedule(
                 }
 
                 string sanitized_g_out = get_sanitized_name(g_out.name());
-                std::cerr << mem_handle.name() << ".compute_at(" << sanitized_g_out << ")\n";
+                debug(2) << mem_handle.name() << ".compute_at(" << sanitized_g_out << ")\n";
                 sched.push_schedule(mem_handle.name(), mem.stage_num,
                                     "compute_at(" + sanitized_g_out + ", " + tile_inner_var.name() + ")",
                                     {sanitized_g_out, tile_inner_var.name()});
