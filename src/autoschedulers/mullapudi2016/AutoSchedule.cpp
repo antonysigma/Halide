@@ -1059,9 +1059,9 @@ public:
  */
 class GPUTilingDedup {
 public:
-    constexpr static int vmin = 32;
+    constexpr static int min_n_threads = 32;
     constexpr static int target_n_threads = 128;
-    constexpr static int vmax = 2048;
+    constexpr static int max_n_threads = 1024;
 
 private:
     const bool is_compute_at = false;
@@ -1090,6 +1090,27 @@ private:
 
     bool isUpdate() const {
         return f.name().find("update") != std::string::npos;
+    }
+
+    void markGPUThreads(AutoSchedule& sched) const {
+        for(const auto& v : ordering) {
+
+            const auto& v_name = v.name();
+            if(isInner(v_name)) {
+                // Mark as gpu theads.
+                f.gpu_threads(v);
+                sched.push_schedule(f.name(), stage_num, "gpu_threads(" + v_name + ")", {v_name});
+                continue;
+            }
+
+            // Skip all gpu_blocks if the current Stage is "compute_at" another
+            // stage, in which the gpu_blocks are already specified.
+            if(!is_compute_at && isOuter(v_name)) {
+                // Mark as gpu blocks;
+                f.gpu_blocks(v);
+                sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v_name + ")", {v_name});
+            }
+        }
     }
 
 public:
@@ -1199,8 +1220,6 @@ public:
 
     /** Generate Halide GPU schedules. */
     void apply(AutoSchedule &sched) const {
-        GPUTileHelper helper{f, stage_num};
-
         if(!ordering.empty() && !is_initial_order) {
             std::set<std::string> var_list;
             for (const auto &v : ordering) {
@@ -1224,35 +1243,22 @@ public:
         * auto-scheduler to avoid tiling configurations that generate too few or
         * too many threads per GPU thread block.
         */
-        Expr threads_budget = target_n_threads;
-        bool is_already_split = false;
+        const bool is_already_split = (inner_vars.size() + outer_vars.size() > 0);
+        if(is_already_split) {
+            // If the Mullapudi's auto-splitting algorithm already computes the
+            // tile size, we simply mark the inner dims as gpu_threads();
+            // similarly, outer dims as gpu_blocks().
+            markGPUThreads(sched);
+            return;
+        }
+
+        GPUTileHelper helper{f, stage_num};
+        Expr threads_budget = max_n_threads;
+
         // Traverse the dimensions, ordered by the variable names (x, y, z) in lexilogical order.
         for (const auto &v : ordering) {
 
             const auto &v_name = v.name();
-            if (isInner(v_name)) {
-                // Mark as gpu theads and blocks;
-                f.gpu_threads(v);
-                sched.push_schedule(f.name(), stage_num, "gpu_threads(" + v.name() + ")", {v_name});
-
-                is_already_split = true;
-                continue;
-            }
-
-            if (isOuter(v_name) && !is_compute_at) {
-                // Mark as gpu theads and blocks;
-                f.gpu_blocks(v);
-                sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v.name() + ")", {v_name});
-
-                is_already_split = true;
-                continue;
-            }
-
-            if (is_already_split) {
-                // Skip dimensions that are already split in the main Mullapudi algorithm.
-                continue;
-            }
-
             const auto iter = parallelize.find(v_name);
             if (iter == parallelize.end()) {
                 // Skip inner dimensions that are not parallelized.
@@ -2827,7 +2833,7 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
     // values produced by the function.
     auto vec_len = [&]() -> const int {
         if(t.has_gpu_feature()) {
-            return GPUTilingDedup::target_n_threads;
+            return GPUTilingDedup::min_n_threads;
         }
 
         const auto& types = func.output_types();
