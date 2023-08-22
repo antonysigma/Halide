@@ -2882,8 +2882,8 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
         //
         // TODO: Check if the warning is necessary.
         if (vec_dim_index > 0) {
-            user_warning << "Outer dim vectorization of var \"" << vec_dim_name
-                         << "\" in function \"" << f_handle.name() << "\"\n";
+            debug(1) << "Outer dim vectorization of var \"" << vec_dim_name
+                     << "\" in function \"" << f_handle.name() << "\"\n";
         }
     }
 }
@@ -3232,8 +3232,8 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    if (can_prove(def_par < arch_params.parallelism && def_par != 1)) {
-        user_warning << "Insufficient parallelism for " << f_handle.name() << "\n";
+    if (can_prove(def_par < arch_params.parallelism)) {
+        debug(1) << "Insufficient parallelism for " << f_handle.name() << "\n";
     }
 
     if (t.has_gpu_feature()) {
