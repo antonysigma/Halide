@@ -1420,7 +1420,7 @@ struct Partitioner {
             : cost(c), parallelism(std::move(p)) {
         }
 
-        bool defined() const {
+        inline bool defined() const {
             return cost.defined() && parallelism.defined();
         }
 
@@ -3308,7 +3308,9 @@ void Partitioner::generate_group_cpu_schedule(
                 } else {
                     Func(mem.func).compute_at(Func(g_out), tile_inner_var.var);
                 }
+
                 string sanitized_g_out = get_sanitized_name(g_out.name());
+                debug(2) << mem_handle.name() << ".compute_at(" << sanitized_g_out << ")\n";
                 sched.push_schedule(mem_handle.name(), mem.stage_num,
                                     "compute_at(" + sanitized_g_out + ", " + tile_inner_var.name() + ")",
                                     {sanitized_g_out, tile_inner_var.name()});
@@ -3649,6 +3651,8 @@ bool inline_unbounded(const vector<Function> &outputs,
     return inlined;
 }
 
+}  // anonymous namespace
+
 // Generate schedules for all functions in the pipeline required to compute the
 // outputs. This applies the schedules and returns a string representation of
 // the schedules. The target architecture is specified by 'target'.
@@ -3843,16 +3847,6 @@ string generate_schedules(const vector<Function> &outputs, const Target &target,
     debug(2) << "Generating CPU schedule...\n";
     part.generate_cpu_schedule(target, sched);
 
-    // Ensure that all update stages are "touched" so we get no warnings/errors
-    for (const auto &f : sched.func_schedules) {
-        const Function &func = get_element(sched.env, f.first);
-        const int num_update_stages = func.updates().size();
-        for (int stage = 0; stage < num_update_stages; stage++) {
-            Definition def = get_stage_definition(func, stage + 1);
-            def.schedule().touched() = true;
-        }
-    }
-
     std::ostringstream oss;
     oss << sched;
     string sched_string = oss.str();
@@ -3897,7 +3891,6 @@ struct Mullapudi2016 {
 };
 
 REGISTER_AUTOSCHEDULER(Mullapudi2016)
-}  // anonymous namespace
 
 }  // namespace Autoscheduler
 }  // namespace Internal
