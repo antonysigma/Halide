@@ -24,14 +24,27 @@ namespace {
 
 struct ArchParams {
     /** Maximum level of parallelism avalaible. */
-    int parallelism = 16;
+    int parallelism{};
 
     /** Size of the last-level cache (in bytes). */
-    uint64_t last_level_cache_size = 16 * 1024 * 1024;
+    uint64_t last_level_cache_size{};
 
     /** Indicates how much more expensive is the cost of a load compared to
      * the cost of an arithmetic operation at last level cache. */
-    float balance = 40;
+    float balance{};
+
+    /** If GPU target is detected, but machine parameters are not specified, *
+     * make a realistic estimate based on consumer-grade GPUs (Nvidia GTX *
+     * 1660/Turing), or low-cost scientific-grade GPUs (Nvidia K40/Tesla).
+     *
+     * Section 5.4 of the Mullapudi2016 article: We configure the auto-scheduler
+     * to target the GPU by setting the PARALLELISM_THRESHOLD to 128, ..., and
+     * CACHE_SIZE to 48 KB.
+     */
+    constexpr ArchParams(bool has_gpu_feature)
+        : parallelism(has_gpu_feature ? 128 : 16), last_level_cache_size(has_gpu_feature ? 48 * 1024 : 16 * 1024 * 1024),
+          balance(has_gpu_feature ? 20 : 40) {
+    }
 };
 
 // Substitute parameter estimates into the exprs describing the box bounds.
@@ -2823,6 +2836,10 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
     // values produced by the function.
     const auto vec_len = [&]() -> int {
         if (t.has_gpu_feature()) {
+            /** Section 5.4 of the Mullapudi2016 article: We configure the
+             * auto-scheduler to target the GPU by set- ting the ...,
+             * VECTOR_WIDTH to 32.
+             */
             return GPUTilingDedup::min_n_threads;
         }
 
@@ -3851,7 +3868,7 @@ struct Mullapudi2016 {
             pipeline_outputs.push_back(f.function());
         }
 
-        ArchParams arch_params;
+        ArchParams arch_params{target.has_gpu_feature()};
         {
             ParamParser parser(params_in.extra);
             parser.parse("parallelism", &arch_params.parallelism);
