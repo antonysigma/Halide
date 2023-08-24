@@ -922,7 +922,7 @@ public:
      * @param[in] is_compute_at whether the current stage is computed at another stage.
      */
     void commit(AutoSchedule &sched, bool is_compute_at) const {
-        if (vars.empty()) {
+        if (vars.empty() && !is_compute_at) {
             /** When split dimensions are not specified, implement the compute
              * in a single GPU thread. Examples are: scalar reduction, scalar
              * data copy. */
