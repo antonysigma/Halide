@@ -956,6 +956,8 @@ public:
 
         std::stringstream oss;
         switch (vars.size()) {
+        case 0:
+            return;
         case 1: {
             const auto &[v, outer, inner, factor, strategy] = vars.front();
             f.split(v, outer, inner, factor, strategy);
@@ -1003,7 +1005,7 @@ public:
 
             break;
         }
-        case 3: {
+        default: {
             const auto &x = vars[0];
             const auto &y = vars[1];
             const auto &z = vars[2];
@@ -1093,6 +1095,7 @@ private:
     bool is_initial_order = true;
     std::vector<VarOrRVar> ordering;
 
+    std::set<std::string> is_split;
     std::set<std::string> outer_vars;
     std::set<std::string> inner_vars;
 
@@ -1121,12 +1124,17 @@ private:
                 continue;
             }
 
+            if (is_compute_at) {
+                continue;
+            }
+
             // Skip all gpu_blocks if the current Stage is "compute_at" another
             // stage, in which the gpu_blocks are already specified.
-            if (!is_compute_at && is_outer(v_name)) {
+            if (is_outer(v_name)) {
                 // Mark as gpu blocks;
                 f.gpu_blocks(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v_name + ")", {v_name});
+                continue;
             }
         }
     }
@@ -1200,6 +1208,7 @@ public:
      */
     void has_split(const VarOrRVar &v, const VarOrRVar &vo, const VarOrRVar &vi, const Expr &factor, TailStrategy strategy) {
         debug(2) << f.name() << ".split(" << v.name() << "," << factor << ")\n";
+        is_split.emplace(v.name());
         outer_vars.emplace(vo.name());
         inner_vars.emplace(vi.name());
 
@@ -1254,7 +1263,7 @@ public:
             sched.push_schedule(f.name(), stage_num, oss.str(), var_list);
         }
 
-        const bool is_already_split = (inner_vars.size() + outer_vars.size() > 0);
+        const bool is_already_split = (!is_split.empty());
         if (is_already_split) {
             // If the Mullapudi's auto-splitting algorithm already computes the
             // tile size, we simply mark the inner dims as gpu_threads();
@@ -2812,21 +2821,11 @@ pair<VarOrRVar, VarOrRVar> Partitioner::split_dim(
     f_handle.split(v, outer, inner, factor, strategy);
     std::ostringstream oss;
     oss << "split(" << arg_name << ", " << outer_name << ", " << inner_name << ", " << factor;
-    switch (strategy) {
-    case TailStrategy::RoundUp:
-        oss << ", TailStrategy::RoundUp)";
-        break;
-    case TailStrategy::GuardWithIf:
-        oss << ", TailStrategy::GuardWithIf)";
-        break;
-    case TailStrategy::ShiftInwards:
-        oss << ", TailStrategy::ShiftInwards)";
-        break;
-    case TailStrategy::Auto:
+
+    if (strategy == TailStrategy::Auto) {
         oss << ")";
-        break;
-    default:
-        internal_error;
+    } else {
+        oss << ", " << to_string(strategy) << ")";
     }
     sched.push_schedule(f_handle.name(), stage_num, oss.str(),
                         {arg_name, outer_name, inner_name});
@@ -2862,9 +2861,8 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
 
         int vec_len = 0;
         for (const auto &type : func.output_types()) {
-            vec_len = std::max(vec_len, t.natural_vector_size(type));
+            vec_len += t.natural_vector_size(type);
         }
-
         return vec_len;
     }();
 
@@ -2916,13 +2914,10 @@ void Partitioner::vectorize_stage(const Group &g, Stage f_handle, int stage_num,
         // storage dimension of the func.
         //
         // TODO: Check if the warning is necessary.
-        //
-        // Disabled: this isn't really user actionable, and is just noise.
-        //
-        // if (vec_dim_index > 0) {
-        //     user_warning << "Outer dim vectorization of var \"" << vec_dim_name
-        //                  << "\" in function \"" << f_handle.name() << "\"\n";
-        // }
+        if (vec_dim_index > 0) {
+            debug(1) << "Outer dim vectorization of var \"" << vec_dim_name
+                     << "\" in function \"" << f_handle.name() << "\"\n";
+        }
     }
 }
 
@@ -3270,12 +3265,9 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    // Silenced: the user can't really do anything about it,
-    // and it triggers on things like tiny lookup tables
-    //
-    // if (can_prove(def_par < arch_params.parallelism)) {
-    //     user_warning << "Insufficient parallelism for " << f_handle.name() << "\n";
-    // }
+    if (can_prove(def_par < arch_params.parallelism)) {
+        debug(1) << "Insufficient parallelism for " << f_handle.name() << "\n";
+    }
 
     if (t.has_gpu_feature()) {
         gpu_tiling.apply(sched);
