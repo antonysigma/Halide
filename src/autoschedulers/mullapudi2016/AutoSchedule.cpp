@@ -1139,21 +1139,23 @@ public:
      * @param[in] v dimension to parallelize.
      * @param[in] factor expected extent of the dimension.
      */
-    void can_parallelize(const VarOrRVar &v, const Expr &factor) {
+    std::optional<split_t> can_parallelize(const VarOrRVar &v, const Expr &factor) {
         const auto &var = v.name();
 
         if (is_outer(var) || is_inner(var)) {
             // For CPU, it makes sense to mark the outer loop to execute in
             // parallel. But this operation is redundant in GPU as the gpu_block
             // is already specified.
-            return;
+            return std::nullopt;
         }
 
         debug(2) << f.name() << ".parallel(" << v.name() << "," << factor << ")\n";
         VarOrRVar outer{var + "_o", v.is_rvar};
         VarOrRVar inner{var + "_i", v.is_rvar};
 
-        parallelize.try_emplace(var, split_t{v, std::move(outer), std::move(inner), factor, TailStrategy::Auto});
+        split_t entry{v, outer, inner, factor, TailStrategy::Auto};
+        parallelize.try_emplace(var, entry);
+        return entry;
     }
 
     /** Indicate the desire to Func::vectorize(v_i).
@@ -3201,8 +3203,8 @@ void Partitioner::generate_group_cpu_schedule(
 
         if (t.has_gpu_feature() && vectorized_split) {
             auto [v_i, v_o] = *vectorized_split;
-            inner_dims.emplace_back(std::move(v_i));
-            outer_dims.emplace_back(std::move(v_o));
+            inner_dims.emplace_back(v_i);
+            outer_dims.emplace_back(v_o);
         }
     }
 
@@ -3255,7 +3257,12 @@ void Partitioner::generate_group_cpu_schedule(
                     }
                 }
                 if (t.has_gpu_feature()) {
-                    gpu_tiling.can_parallelize(v, iter->second);
+                    auto parallelized_split = gpu_tiling.can_parallelize(v, iter->second);
+                    if (parallelized_split) {
+                        auto split_vars = *parallelized_split;
+                        inner_dims.emplace_back(split_vars.inner);
+                        outer_dims.emplace_back(split_vars.outer);
+                    }
                 } else {
                     f_handle.parallel(v);
                     sched.push_schedule(f_handle.name(), g.output.stage_num,
