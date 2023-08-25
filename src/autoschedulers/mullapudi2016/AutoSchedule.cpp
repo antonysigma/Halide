@@ -1154,7 +1154,11 @@ public:
         VarOrRVar inner{var + "_i", v.is_rvar};
 
         split_t entry{v, outer, inner, factor, TailStrategy::Auto};
-        parallelize.try_emplace(var, entry);
+        const auto [_, insertion_happened] = parallelize.try_emplace(var, entry);
+        if (!insertion_happened) {
+            return std::nullopt;
+        }
+
         return entry;
     }
 
@@ -1163,15 +1167,16 @@ public:
      * @param[in] vo split into outer dimension
      * @param[in] vi split into inner dimension
      * @param[in] factor the partition size.
+     * @return whether the vectorize() request is accepted or rejected.
      */
-    void can_vectorize(const VarOrRVar &v, const VarOrRVar &vo, const VarOrRVar &vi, const Expr &factor) {
+    bool can_vectorize(const VarOrRVar &v, const VarOrRVar &vo, const VarOrRVar &vi, const Expr &factor) {
         const auto &var = v.name();
 
         if (is_inner(var)) {
             // For CPU, it makes sense to further split the inner loop and run
             // SIMD instruction. But this operation is redundant in GPU as the
             // gpu_block is already specified.
-            return;
+            return false;
         }
 
         debug(2) << f.name() << ".vectorize(" << v.name() << "," << factor << ")\n";
@@ -1180,10 +1185,11 @@ public:
             // vectorized dimension is treated as a thread in GPU. No need to
             // further split it to match the natural_vector_size() of CPUs.
             inner_vars.emplace(v.name());
-            return;
+            return false;
         }
 
         parallelize.try_emplace(var, split_t{v, vo, vi, factor, TailStrategy::Auto});
+        return true;
     }
 
     /** Mark the current dimension is already split by Mullapudi2016's
@@ -2880,11 +2886,11 @@ std::optional<pair<VarOrRVar, VarOrRVar>> Partitioner::vectorize_stage(const Gro
         internal_assert(is_rvar == dims[vec_dim_index].is_rvar());
 
         VarOrRVar vec_var(vec_dim_name, is_rvar);
-        auto [inner, outer] = [&]() -> std::pair<VarOrRVar, VarOrRVar> {
+        auto [inner, outer, accepted] = [&]() -> std::tuple<VarOrRVar, VarOrRVar, bool> {
             if (t.has_gpu_feature()) {
                 VarOrRVar inner{vec_var.name() + "_vi", vec_var.is_rvar}, outer{vec_var.name() + "_vo", vec_var.is_rvar};
-                gpu_tiling.can_vectorize(vec_var, outer, inner, vec_len);
-                return {inner, outer};
+                const bool accepted = gpu_tiling.can_vectorize(vec_var, outer, inner, vec_len);
+                return {inner, outer, accepted};
             }
 
             auto split_vars = split_dim(g, f_handle, stage_num, def, is_group_output, vec_var, vec_len,
@@ -2894,7 +2900,7 @@ std::optional<pair<VarOrRVar, VarOrRVar>> Partitioner::vectorize_stage(const Gro
             sched.push_schedule(f_handle.name(), stage_num,
                                 "vectorize(" + split_vars.first.name() + ")",
                                 {split_vars.first.name()});
-            return split_vars;
+            return std::make_tuple(split_vars.first, split_vars.second, true);
         }();
 
         if (is_rvar) {
@@ -2910,6 +2916,10 @@ std::optional<pair<VarOrRVar, VarOrRVar>> Partitioner::vectorize_stage(const Gro
         if (vec_dim_index > 0) {
             debug(1) << "Outer dim vectorization of var \"" << vec_dim_name
                      << "\" in function \"" << f_handle.name() << "\"\n";
+        }
+
+        if (!accepted) {
+            return std::nullopt;
         }
 
         return make_pair(inner, outer);
@@ -3284,7 +3294,8 @@ void Partitioner::generate_group_cpu_schedule(
     }
 
     // Find the level at which group members will be computed.
-    int tile_inner_index = dims.size() - outer_dims.size() - 1;
+    internal_assert(dims.size() > outer_dims.size());
+    const auto tile_inner_index = dims.size() - outer_dims.size() - 1;
     VarOrRVar tile_inner_var(Var::outermost());
     if (!outer_dims.empty()) {
         string var_name = get_base_name(dims[tile_inner_index].var);
