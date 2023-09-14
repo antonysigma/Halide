@@ -269,3 +269,8 @@ TAGS
 # TODO: these should become .cmake.in
 !packaging/common/HalideConfig.cmake
 !packaging/common/HalideHelpersConfig.cmake
+
+# Javascript toolchain files
+src/irvisualizer/node_modules/
+src/irvisualizer/dist/
+
