@@ -1005,8 +1005,8 @@ public:
             oss << "tile({"
                 << x.v.name() << ", "
                 << y.v.name() << ", "
-                << z.v.name() << "}, "  //
-                << x.outer.name() << "}, {"
+                << z.v.name() << "}, {"  //
+                << x.outer.name() << ", "
                 << y.outer.name() << ", "
                 << z.outer.name() << "}, {"  //
                 << x.inner.name() << ", "
