@@ -1112,6 +1112,7 @@ private:
     }
 
     void mark_gpu_threads(AutoSchedule &sched) const {
+        bool is_gpu_block_marked = false;
         for (const auto &v : ordering) {
 
             const auto &v_name = v.name();
@@ -1122,17 +1123,17 @@ private:
                 continue;
             }
 
+            // Skip all gpu_blocks if the current Stage is "compute_at" another
+            // stage, in which the gpu_blocks are already specified.
             if (is_compute_at) {
                 continue;
             }
 
-            // Skip all gpu_blocks if the current Stage is "compute_at" another
-            // stage, in which the gpu_blocks are already specified.
-            if (is_outer(v_name)) {
+            if (is_outer(v_name) || is_gpu_block_marked) {
                 // Mark as gpu blocks;
                 f.gpu_blocks(v);
                 sched.push_schedule(f.name(), stage_num, "gpu_blocks(" + v_name + ")", {v_name});
-                continue;
+                is_gpu_block_marked = true;
             }
         }
     }
