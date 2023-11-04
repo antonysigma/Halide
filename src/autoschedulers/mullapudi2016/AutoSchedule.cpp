@@ -1009,11 +1009,11 @@ public:
             const auto &z = vars[2];
             f.tile({x.v, y.v, z.v}, {x.outer, y.outer, z.outer}, {x.inner, y.inner, z.inner}, {x.factor, y.factor, z.factor});
 
-            oss << "tile({"
+            oss << ".tile({"
                 << x.v.name() << ", "
                 << y.v.name() << ", "
-                << z.v.name() << "}, "  //
-                << x.outer.name() << "}, {"
+                << z.v.name() << "}, {"  //
+                << x.outer.name() << ", "
                 << y.outer.name() << ", "
                 << z.outer.name() << "}, {"  //
                 << x.inner.name() << ", "
