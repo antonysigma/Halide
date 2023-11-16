@@ -939,7 +939,13 @@ public:
             /** When split dimensions are not specified, implement the compute
              * in a single GPU thread. Examples are: scalar reduction, scalar
              * data copy. */
-            f.gpu_single_thread();
+	    auto& rvars = f.get_schedule().rvars();
+	    for(int i = 1; i< rvars.size(); i++) {
+			RVar inner(rvars[i - 1].var);
+			RVar fused(rvars[i].var);
+		    f.fuse(inner, fused, fused);
+	    }
+	    f.gpu_single_thread();
             debug(2) << f.name() << ".gpu_single_thread()\n";
             sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
             return;
