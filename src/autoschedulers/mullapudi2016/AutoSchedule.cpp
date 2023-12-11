@@ -939,13 +939,29 @@ public:
             /** When split dimensions are not specified, implement the compute
              * in a single GPU thread. Examples are: scalar reduction, scalar
              * data copy. */
-	    auto& rvars = f.get_schedule().rvars();
-	    for(int i = 1; i< rvars.size(); i++) {
-			RVar inner(rvars[i - 1].var);
-			RVar fused(rvars[i].var);
-		    f.fuse(inner, fused, fused);
-	    }
+        {
+            const auto& _rvars = f.get_schedule().rvars();
+            std::vector<RVar> rvars;
+            rvars.reserve(_rvars.size());
+            std::transform(_rvars.begin(), _rvars.end(), std::back_inserter(rvars), [](const auto& x){
+                return RVar(x.var);
+            });
+
+            for(int i = 1; i < rvars.size(); i++) {
+                const auto& inner = rvars[i - 1];
+                const auto& outer = rvars[i];
+                f.fuse(inner, outer, outer);
+            }
+        //    const auto& rvars = f.get_schedule().rvars();
+            const auto& ri = rvars.front();
+            const auto& ro = rvars.back();
+
+            //Var u, v;
+            //auto intm = f.rfactor({{ri, u}}).compute_root();
+        }
+
 	    f.gpu_single_thread();
+
             debug(2) << f.name() << ".gpu_single_thread()\n";
             sched.push_schedule(f.name(), stage_num, "gpu_single_thread()", {});
             return;
