@@ -139,7 +139,7 @@ void CodeGen_PTX_Dev::add_kernel(Stmt stmt,
                                  const std::vector<DeviceArgument> &args) {
     internal_assert(module != nullptr);
 
-    debug(2) << "In CodeGen_PTX_Dev::add_kernel\n";
+    debug(2) << "In CodeGen_PTX_Dev::add_kernel(" << name << ")\n";
 
     // Now deduce the types of the arguments to our function
     vector<llvm::Type *> arg_types(args.size());

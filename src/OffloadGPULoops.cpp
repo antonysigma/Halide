@@ -1,4 +1,5 @@
 #include <memory>
+#include <regex>
 
 #include "Closure.h"
 #include "CodeGen_D3D12Compute_Dev.h"
@@ -26,6 +27,26 @@ using std::unique_ptr;
 using std::vector;
 
 namespace {
+
+std::string get_canonical_kernel_name(std::string kernel_name) {
+    using std::string;
+    static std::unordered_map<string, string> dedup_kernel;
+
+    const std::regex stage_id_re{"__[0-9]_s0"};
+
+    // get the actual name of the generated kernel for this loop
+    const auto canonical_name = std::regex_replace(kernel_name, stage_id_re, "_s0");
+
+    const auto item = dedup_kernel.find(canonical_name);
+    if (item != dedup_kernel.end()) {
+        // Found
+        return item->second;
+    }
+
+    // Not found
+    dedup_kernel[canonical_name] = kernel_name;
+    return kernel_name;
+}
 
 // Sniff the contents of a kernel to extracts the bounds of all the
 // thread indices (so we know how many threads to launch), and the
@@ -187,7 +208,7 @@ class InjectGpuOffload : public IRMutator {
         gpu_codegen->add_kernel(loop, kernel_name, closure_args);
 
         // get the actual name of the generated kernel for this loop
-        kernel_name = gpu_codegen->get_current_kernel_name();
+        kernel_name = get_canonical_kernel_name(gpu_codegen->get_current_kernel_name());
         debug(2) << "Compiled launch to kernel \"" << kernel_name << "\"\n";
 
         bool runtime_run_takes_types = gpu_codegen->kernel_run_takes_types();
