@@ -28,23 +28,24 @@ using std::vector;
 
 namespace {
 
-std::string get_canonical_kernel_name(std::string kernel_name) {
+std::string get_canonical_kernel_name(std::string kernel_name, size_t n_args) {
     using std::string;
-    static std::unordered_map<string, string> dedup_kernel;
+    using key_t = std::pair<string, size_t>;
+    static std::map<key_t, string> dedup_kernel;
 
     const std::regex stage_id_re{"__[0-9]_s0"};
 
     // get the actual name of the generated kernel for this loop
     const auto canonical_name = std::regex_replace(kernel_name, stage_id_re, "_s0");
 
-    const auto item = dedup_kernel.find(canonical_name);
+    const auto item = dedup_kernel.find(std::make_pair(canonical_name, n_args));
     if (item != dedup_kernel.end()) {
         // Found
         return item->second;
     }
 
     // Not found
-    dedup_kernel[canonical_name] = kernel_name;
+    dedup_kernel[std::make_pair(canonical_name, n_args)] = kernel_name;
     return kernel_name;
 }
 
@@ -208,7 +209,7 @@ class InjectGpuOffload : public IRMutator {
         gpu_codegen->add_kernel(loop, kernel_name, closure_args);
 
         // get the actual name of the generated kernel for this loop
-        kernel_name = get_canonical_kernel_name(gpu_codegen->get_current_kernel_name());
+        kernel_name = get_canonical_kernel_name(gpu_codegen->get_current_kernel_name(), closure_args.size());
         debug(2) << "Compiled launch to kernel \"" << kernel_name << "\"\n";
 
         bool runtime_run_takes_types = gpu_codegen->kernel_run_takes_types();
