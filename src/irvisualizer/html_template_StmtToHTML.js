@@ -264,5 +264,8 @@ function initToolbar() {
             document.body.setAttribute("data-theme", themeRadios[i].value);
         }
     }
+    document.body.setAttribute("data-show-assembly", false);
+    document.body.setAttribute("data-show-device-code", false);
+    document.body.setAttribute("data-theme", "gruvbox-dark");
 }
 initToolbar();
