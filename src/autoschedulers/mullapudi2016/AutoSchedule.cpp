@@ -950,12 +950,15 @@ public:
 
     /** Indicate the need to split the dimensions with `gpu_tile()` method. */
     bool try_split(const split_info &x) {
-        if (vars.size() >= 3) {
-            return false;
+        if (vars.size() <= 2) {
+            vars.emplace_back(x);
+            return true;
         }
 
-        vars.emplace_back(x);
-        return true;
+        fuse_vars.emplace_back(vars.back().v);
+        vars.back() = x;
+        vars.back().factor = simplify(vars.back().factor * x.factor);
+        return false;
     }
 
     /** Apply Halide schedules.
@@ -975,6 +978,14 @@ public:
 
         std::stringstream oss;
 
+        if (!fuse_vars.empty()) {
+            for (auto iter = fuse_vars.begin(); iter + 1 != fuse_vars.end(); ++iter) {
+                f.fuse(*iter, *(iter + 1), *(iter + 1));
+            }
+            f.fuse(fuse_vars.back(), vars.back().v, vars.back().v);
+        }
+
+        internal_assert(vars.size() <= 3);
         switch (vars.size()) {
         case 0:
             return;
@@ -1076,6 +1087,7 @@ private:
     const uint32_t stage_num;
 
     std::vector<split_info> vars;
+    std::vector<VarOrRVar> fuse_vars;
 };
 
 /** Idempotent Halide scheduling for GPU.
