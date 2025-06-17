@@ -1104,6 +1104,7 @@ public:
      */
     constexpr static int min_n_threads = 32;
     constexpr static int max_n_threads = 1024;
+    const int parallelism;
 
 private:
     const bool is_compute_at = false;
@@ -1188,8 +1189,8 @@ private:
     }
 
 public:
-    GPUTilingDedup(bool i, Stage &_f, uint32_t n)
-        : is_compute_at(i), f(_f), stage_num(n) {
+    GPUTilingDedup(int p, bool i, Stage &_f, uint32_t n)
+        : parallelism(p), is_compute_at(i), f(_f), stage_num(n) {
     }
 
     /** Indicate the desire to Func::parallel(v_o).
@@ -1366,7 +1367,11 @@ public:
         }
 
         GPUTileHelper helper{f, stage_num};
-        Expr threads_budget = max_n_threads;
+
+        // upstream Func may be computed_at the current Func. Reserve GPU
+        // threads for this case by reducing the threads budget by the factor of
+        // autoscheduler_params.parallelism.
+        Expr threads_budget = simplify(max_n_threads / parallelism);
 
         // Maximize GPU thread occupancy with the grid-stride loop.
         //
@@ -3265,7 +3270,7 @@ void Partitioner::generate_group_cpu_schedule(
         }
     }
 
-    GPUTilingDedup gpu_tiling{false, f_handle, g.output.stage_num};
+    GPUTilingDedup gpu_tiling{arch_params.parallelism, false, f_handle, g.output.stage_num};
     gpu_tiling.set_initial_order(Func(g_out));
 
     // Reorder the dimensions for better spatial locality (i.e. smallest stride
@@ -3499,7 +3504,7 @@ void Partitioner::generate_group_cpu_schedule(
                 sched.push_schedule(mem_handle.name(), mem.stage_num, "compute_root()", {});
             }
         }
-        GPUTilingDedup gpu_tiling2{true, mem_handle, mem.stage_num};
+        GPUTilingDedup gpu_tiling2{arch_params.parallelism, true, mem_handle, mem.stage_num};
         gpu_tiling2.set_initial_order(Func(mem.func));
 
         // Reorder the dimensions for better spatial locality. If we only have
