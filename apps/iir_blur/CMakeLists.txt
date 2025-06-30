@@ -34,7 +34,7 @@ set(IMAGE ${CMAKE_CURRENT_LIST_DIR}/../images/rgba.png)
 if (EXISTS ${IMAGE})
     configure_file(${IMAGE} rgba.png COPYONLY)
     add_test(NAME iir_blur_filter
-             COMMAND iir_blur_filter rgba.png out.png)
+             COMMAND iir_blur_filter rgb.png out.png)
     set_tests_properties(iir_blur_filter PROPERTIES
                          LABELS iir_blur
                          PASS_REGULAR_EXPRESSION "Success!"
